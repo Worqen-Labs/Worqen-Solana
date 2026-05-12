@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Worqen escrow program — devnet deployment manifest. Canonical source for program ID, upgrade authority, and keypair paths used by CI/deploy scripts and off-chain services.",
+  "network": "devnet",
+  "cluster_rpc": "https://api.devnet.solana.com",
+  "explorer": {
+    "program": "https://explorer.solana.com/address/GDCBqN8AVU5i2xXdeTNwBmCCsd9Y8rfiH1JDKA8UjDYh?cluster=devnet",
+    "solscan": "https://solscan.io/account/GDCBqN8AVU5i2xXdeTNwBmCCsd9Y8rfiH1JDKA8UjDYh?cluster=devnet"
+  },
+  "program": {
+    "id": "GDCBqN8AVU5i2xXdeTNwBmCCsd9Y8rfiH1JDKA8UjDYh",
+    "account_schema_version": 2,
+    "program_version": "v2.0",
+    "anchor_version": "0.32.1",
+    "keypair_path": "solana/target/deploy/worqen_escrow-v2-keypair.json",
+    "so_path": "solana/target/deploy/worqen_escrow.so",
+    "data_length_bytes": 543112,
+    "programdata_address": "BKv9Pv3Vjb26QQaPc3KtEtvkomAJ8NjDJd9w8sxMiP5a",
+    "bpf_loader": "BPFLoaderUpgradeab1e11111111111111111111111"
+  },
+  "upgrade_authority": {
+    "pubkey": "MPq6BwTsfBNmA7DwdaRGLeX8Bg67Kj5sFwsiYDexste",
+    "keypair_path": "~/.config/solana/id.json",
+    "notes": "v2 deployer wallet. v1.1 used DTVG8EyJu5c9UJexVwRrGPegddMDrSA9Nt1Fne4shPrs as upgrade authority — that program ID still exists at GVST6WJqsj1BmFSRy1a9Xi2DK8BZtzjiFGkjQCRSmaUW for legacy escrows. For CI, load via SOLANA_UPGRADE_AUTHORITY_KEYPAIR secret or use a dedicated MPC/HSM for mainnet."
+  },
+  "legacy": {
+    "v1_program_id": "GVST6WJqsj1BmFSRy1a9Xi2DK8BZtzjiFGkjQCRSmaUW",
+    "v1_upgrade_authority": "DTVG8EyJu5c9UJexVwRrGPegddMDrSA9Nt1Fne4shPrs",
+    "note": "v1.1 program is still live at the legacy ID for any in-flight v1 escrows. New escrows use the v2 program ID at the top of this file."
+  },
+  "idl": {
+    "source_of_truth": "solana/target/idl/worqen_escrow.json",
+    "typescript_types": "solana/target/types/worqen_escrow.ts",
+    "frontend_copy": "frontend/apps/dashboard/lib/solana-wallet/idl/worqen_escrow.json",
+    "frontend_types": "frontend/apps/dashboard/lib/solana-wallet/idl/worqen_escrow.ts",
+    "onchain_idl_account": "GikZKyNmH43vfBaajmNb2D2bXDwnpxxUXU1ferQYr8Ti"
+  },
+  "deployment_history": [
+    {
+      "version": "v2.0",
+      "deployed_slot": 459888776,
+      "deploy_tx": "Nxw6MnFag8i37AwF1CaUG6FephAuvVS8rcYCTZt5dVTVzYGbj2Qukc84gxDchHtDgvRAWH8XD6pNav2dB6gMBin",
+      "deployed_at": "2026-05-04",
+      "notes": [
+        "Fresh program ID — clean cutover from v1.1 (no in-place upgrade). v1.1 escrows continue on the old program ID.",
+        "Account schema v2: same fields as v1, new semantics.",
+        "Critical security fixes: token destination/mint constraints across all token instructions; SOL drain-actual-balance defends against dust DoS; init_if_needed for employee ATAs unblocks 0-SOL workers.",
+        "Logical fixes: employer-cancel locked after Funded; worker self-release when both confirmed; worker dispute locked in PendingRelease; dispute_deadline mandatory and capped to 90 days; partial-release cumulative-delta commission math; rent-exempt safety check on partials; auto-release simplified to Disputed-state-only; authority rotation blocked while Disputed.",
+        "New instructions: close_escrow_sol and close_escrow_token (refund storage rent on terminal escrows).",
+        "Error codes added: 6024 DisputeLockedAfterConfirm, 6025 DisputeDeadlineRequired, 6026 DisputeDeadlineTooLong, 6027 EmployerCancelAfterFundedDisallowed, 6028 AuthorityRotationDuringDispute, 6029 EscrowNotTerminal, 6030 AutoReleaseTooFar, 6031 IsNativeMintMismatch, 6032 PartialReleaseLeavesDust, 6033 VaultNotEmpty.",
+        "Heavy token contexts boxed (Box<Account<'info, T>>) to keep BPF stack frames under 4096 bytes."
+      ]
+    },
+    {
+      "version": "v1.1",
+      "deployed_slot": 456930523,
+      "deploy_tx": "4rYiid33keQgWvkaJt4b1Kb6uKL7rvnwXRLzt5kd7ANvuBtd1SHXmJZ62Wuinwrd6uHtwwm9sPu3id3np3HZHxpX",
+      "deployed_at": "2026-04-21",
+      "notes": [
+        "Additive: two new instructions for the non-escrow direct-pay flow — pay_with_commission_sol and pay_with_commission_token.",
+        "No account struct changes (the new instructions are stateless). All v1 escrow accounts remain valid.",
+        "New event: DirectPaymentMade (indexer-only; no state persisted on-chain for direct pay).",
+        "New error code: 6023 SelfPaymentNotAllowed.",
+        "Program data account NOT extended — v1's +150KB extend left enough headroom (v1.1 .so is ~494KB, allocation is 518KB)."
+      ]
+    },
+    {
+      "version": "v1",
+      "deployed_slot": 456741442,
+      "deploy_tx": "5XoBkbdCNbba6Sb6UoziqYKjZ8A8Nc263o4VxPc9CSud1KTqgCRvjWyB7vtf8L6i4DuHsrdLVEK11FGyi81Niqi3",
+      "deployed_at": "2026-04-20",
+      "notes": [
+        "Account schema v1: added version, escrow_group_id, sequence_in_group, total_in_group, released_to_employee, auto_release_at, dispute_raised_by/at, dispute_deadline, dispute_resolved_by/at, employee/employer_share_resolved, cancellation_reason, cancelled_by fields.",
+        "New instructions: release_partial_sol/_token, trigger_auto_release_sol/_token, update_platform_authority.",
+        "Modified signatures: create_escrow (+4 params), raise_dispute (+1 param), cancel_escrow_*_token (+reason).",
+        "Pre-upgrade v0 escrow accounts are now unreadable — wipe from backend DB before serving traffic.",
+        "Program data account extended by 150000 bytes before upgrade to fit the grown bytecode (v0 ~368KB -> v1 ~466KB, new allocation 518KB)."
+      ]
+    }
+  ],
+  "related_wallets_on_devnet": {
+    "description": "Convenience wallets pre-provisioned in ~/.config/solana/local-wallets/ used by local integration tests. Not part of the program; listed here so dev scripts can find them.",
+    "employer": "6BnDnkMK98ibJ14dkMXiVnWg9mHvMFy33V2Jwsvnd4QJ",
+    "employee": "F4UgkC3bwMLh5bpmfVgtJdRjNs9iagFe9QHp4BmoSEvQ",
+    "platform_authority": "64PF1jbXinCFteyegYpkPJ25fHKibPeVGJsjmc4AH46H"
+  },
+  "constants": {
+    "escrow_seed": "escrow",
+    "vault_seed": "vault",
+    "max_commission_bps": 1000,
+    "default_commission_bps": 150,
+    "max_dispute_reason_bytes": 256,
+    "max_cancellation_reason_bytes": 128,
+    "usdt_mint_mainnet": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+    "usdc_mint_mainnet": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "usdc_mint_devnet": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+    "usdt_mint_devnet_note": "Tether has no devnet mint; we alias USDT->USDC on devnet. See MULTI_CHAIN_ARCHITECTURE.md §6.5."
+  },
+  "post_deploy_checklist": [
+    "Set ESCROW_PROGRAM_ID=GDCBqN8AVU5i2xXdeTNwBmCCsd9Y8rfiH1JDKA8UjDYh in backend .env (and any deployment env vars).",
+    "Set NEXT_PUBLIC_ESCROW_PROGRAM_ID=GDCBqN8AVU5i2xXdeTNwBmCCsd9Y8rfiH1JDKA8UjDYh in frontend .env.",
+    "Frontend IDL has been replaced (frontend/apps/dashboard/lib/solana-wallet/idl/worqen_escrow.json) with v2 — verify next deploy ships it.",
+    "Backend custodial_signing.py has v2 builders for resolve_dispute_*, trigger_auto_release_*, close_escrow_*. Restart Celery worker + beat to pick up new tasks: disputes.force_resolve_expired (hourly) and escrows.close_terminal (daily).",
+    "v1.1 program at GVST6WJqsj1BmFSRy1a9Xi2DK8BZtzjiFGkjQCRSmaUW remains live for legacy escrows. After all v1 escrows finalize, v1.1 can be unpinned.",
+    "Tests in solana/tests/worqen-escrow.ts were written against v1; cancel-after-funded test will fail under v2. Update or rewrite before next CI run."
+  ]
+}

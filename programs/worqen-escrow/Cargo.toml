@@ -1,0 +1,26 @@
+[package]
+name = "worqen-escrow"
+version = "1.0.0"
+description = "Worqen Escrow — trustless on-chain payment escrow for the Worqen job marketplace (Solana / Anchor 0.32)"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/worqen-labs/worqen-escrow"
+homepage = "https://worqen.com"
+readme = "../../README.md"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "worqen_escrow"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+default = []
+
+[dependencies]
+anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
+anchor-spl = { version = "0.32.1", features = ["token", "associated_token"] }
+solana-security-txt = "1.1.1"
