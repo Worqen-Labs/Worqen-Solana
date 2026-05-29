@@ -3,20 +3,11 @@ use crate::events::PlatformAuthorityRotated;
 use crate::state::{Escrow, EscrowStatus};
 use anchor_lang::prelude::*;
 
-/// Rotate the escrow's `platform_authority` key.
+/// Rotate the escrow's `platform_authority`, signed by the current authority.
 ///
-/// Signed by the *current* platform_authority. Intended for key rotation
-/// after suspected compromise or planned ops changes. Can only be called
-/// while the escrow is in an active state (not Released / Resolved /
-/// Cancelled) — once finalized the authority no longer matters.
-///
-/// **v2 change:** rotation is also blocked while the escrow is `Disputed`.
-/// A compromised authority that rotates mid-dispute could resolve in their
-/// own (or a colluder's) favor; locking rotation during dispute closes
-/// that window.
-///
-/// The new authority must differ from employer and employee to preserve the
-/// three-party model.
+/// Allowed only while the escrow is active. Blocked during `Disputed` so a
+/// compromised authority cannot rotate mid-dispute and resolve in its own
+/// favor. The new authority must differ from employer and employee.
 #[derive(Accounts)]
 pub struct UpdatePlatformAuthority<'info> {
     #[account(
@@ -42,6 +33,10 @@ pub fn handler(ctx: Context<UpdatePlatformAuthority>) -> Result<()> {
 
     require!(
         new_auth != escrow.employer && new_auth != escrow.employee,
+        EscrowError::InvalidNewPlatformAuthority
+    );
+    require!(
+        new_auth != escrow.platform_authority,
         EscrowError::InvalidNewPlatformAuthority
     );
 

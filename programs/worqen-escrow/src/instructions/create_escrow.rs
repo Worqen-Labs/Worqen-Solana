@@ -14,6 +14,8 @@ use anchor_lang::prelude::*;
     is_native: bool,
     commission_rate_bps: u16,
     auto_release_at: i64,
+    escrow_kind: u8,
+    terms_hash: [u8; 32],
 )]
 pub struct CreateEscrow<'info> {
     /// The escrow account to be created (PDA)
@@ -25,6 +27,10 @@ pub struct CreateEscrow<'info> {
         bump
     )]
     pub escrow: Account<'info, Escrow>,
+
+    /// Platform config (pause flag, fee recipient, mint allowlist)
+    #[account(seeds = [crate::state::CONFIG_SEED], bump = config.bump)]
+    pub config: Box<Account<'info, crate::state::Config>>,
 
     /// The employer creating and funding the escrow
     #[account(mut)]
@@ -46,21 +52,9 @@ pub struct CreateEscrow<'info> {
     pub system_program: Program<'info, System>,
 }
 
-/// Creates a new escrow account for a hire / milestone.
-///
-/// # Arguments
-/// * `escrow_id` - Unique identifier (typically SHA256 of milestone id)
-/// * `escrow_group_id` - 32-byte group id (typically SHA256 of hire id) so
-///   indexers can collect all milestone escrows of a hire. Pass [0u8; 32]
-///   when the escrow is not part of a group.
-/// * `sequence_in_group` - 1-indexed milestone position (1..=total_in_group).
-///   Pass 0 if ungrouped.
-/// * `total_in_group` - total milestones in the group. Pass 0 if ungrouped.
-/// * `amount` - worker payment in lamports / token base units (must be > 0)
-/// * `is_native` - true for SOL, false for SPL Token
-/// * `commission_rate_bps` - basis points (max 1000)
-/// * `auto_release_at` - unix ts after which anyone may auto-release to
-///   employee. 0 disables auto-release.
+/// Creates a per-milestone escrow account, deriving its PDA and storing the
+/// parties, amount, commission, and auto-release deadline. Group fields let
+/// indexers collect all milestone escrows of a hire (0 when ungrouped).
 #[allow(clippy::too_many_arguments)]
 pub fn handler(
     ctx: Context<CreateEscrow>,
@@ -72,30 +66,33 @@ pub fn handler(
     is_native: bool,
     commission_rate_bps: u16,
     auto_release_at: i64,
+    escrow_kind: u8,
+    terms_hash: [u8; 32],
 ) -> Result<()> {
     let employer_key = ctx.accounts.employer.key();
     let employee_key = ctx.accounts.employee.key();
     let platform_key = ctx.accounts.platform_authority.key();
     let token_mint_key = ctx.accounts.token_mint.key();
 
-    // Validate amount is non-zero
     require!(amount > 0, EscrowError::InvalidAmount);
 
-    // Validate the commission rate doesn't exceed maximum
     require!(
         commission_rate_bps <= Escrow::MAX_COMMISSION_RATE_BPS,
         EscrowError::InvalidCommissionRate
     );
 
     // Parties must be distinct
-    require!(employer_key != employee_key, EscrowError::EmployeeIsEmployer);
+    require!(
+        employer_key != employee_key,
+        EscrowError::EmployeeIsEmployer
+    );
     require!(
         platform_key != employer_key && platform_key != employee_key,
         EscrowError::PlatformAuthorityConflict
     );
 
-    // is_native ↔ token_mint must be consistent. Native escrows pin the
-    // mint field to System Program ID for clarity; token escrows must not.
+    // is_native must agree with token_mint: native escrows pin the mint to the
+    // System Program ID; token escrows must use a real mint.
     if is_native {
         require!(
             token_mint_key == anchor_lang::system_program::ID,
@@ -108,6 +105,19 @@ pub fn handler(
         );
     }
 
+    require!(
+        !ctx.accounts.config.paused,
+        crate::errors::EscrowError::ProgramPaused
+    );
+
+    // Mint must be on the platform allowlist (native SOL uses System Program ID).
+    require!(
+        ctx.accounts
+            .config
+            .is_mint_allowed(&token_mint_key, is_native),
+        crate::errors::EscrowError::MintNotAllowed
+    );
+
     // Group sequence sanity. If grouped (total > 0), seq must be in [1, total].
     if total_in_group > 0 {
         require!(
@@ -118,7 +128,6 @@ pub fn handler(
         require!(sequence_in_group == 0, EscrowError::InvalidGroupSequence);
     }
 
-    // Calculate commission (0 if rate is 0)
     let commission_amount = Escrow::calculate_commission(amount, commission_rate_bps);
 
     let escrow = &mut ctx.accounts.escrow;
@@ -137,13 +146,9 @@ pub fn handler(
         );
     }
 
-    // Derive vault bump for later use
-    let (_, vault_bump) = Pubkey::find_program_address(
-        &[Escrow::VAULT_SEED, escrow.key().as_ref()],
-        ctx.program_id,
-    );
+    let (_, vault_bump) =
+        Pubkey::find_program_address(&[Escrow::VAULT_SEED, escrow.key().as_ref()], ctx.program_id);
 
-    // Initialize escrow account
     escrow.version = ESCROW_ACCOUNT_VERSION;
     escrow.escrow_id = escrow_id;
     escrow.escrow_group_id = escrow_group_id;
@@ -178,6 +183,10 @@ pub fn handler(
     escrow.cancelled_by = Pubkey::default();
     escrow.bump = ctx.bumps.escrow;
     escrow.vault_bump = vault_bump;
+    escrow.escrow_kind = escrow_kind;
+    escrow.fee_recipient = ctx.accounts.config.fee_recipient;
+    escrow.terms_hash = terms_hash;
+    escrow.reserved = [0u8; 64];
 
     emit!(EscrowCreated {
         escrow_id,
@@ -187,12 +196,15 @@ pub fn handler(
         employer: employer_key,
         employee: employee_key,
         platform_authority: platform_key,
+        fee_recipient: escrow.fee_recipient,
         amount,
         commission_amount,
         commission_rate_bps,
         is_native,
         token_mint: ctx.accounts.token_mint.key(),
         auto_release_at,
+        escrow_kind,
+        terms_hash,
     });
 
     msg!(

@@ -4,16 +4,13 @@ use crate::state::{Escrow, EscrowStatus};
 use anchor_lang::prelude::*;
 use anchor_lang::system_program::{transfer, Transfer};
 
-/// Accounts required for a partial SOL release.
-///
-/// Partial releases are only permitted in `Funded` status (before any
-/// confirmation or dispute). Once a party confirms or disputes, the caller
-/// must use the regular `release_sol` / `resolve_dispute_sol` flows.
+/// Accounts for a partial SOL release (permitted in `Funded` or
+/// `PendingRelease`; disputed escrows must use the dispute flow).
 #[derive(Accounts)]
 pub struct ReleasePartialSol<'info> {
     #[account(
         mut,
-        constraint = escrow.status == EscrowStatus::Funded @ EscrowError::InvalidStatus,
+        constraint = (escrow.status == EscrowStatus::Funded || escrow.status == EscrowStatus::PendingRelease) @ EscrowError::InvalidStatus,
         constraint = escrow.is_native @ EscrowError::NotNativeEscrow,
     )]
     pub escrow: Account<'info, Escrow>,
@@ -35,10 +32,10 @@ pub struct ReleasePartialSol<'info> {
 
     #[account(
         mut,
-        constraint = platform_authority.key() == escrow.platform_authority @ EscrowError::Unauthorized,
+        constraint = fee_recipient.key() == escrow.fee_recipient @ EscrowError::InvalidFeeRecipient,
     )]
-    /// CHECK: Verified against escrow.platform_authority
-    pub platform_authority: UncheckedAccount<'info>,
+    /// CHECK: Verified against escrow.fee_recipient
+    pub fee_recipient: UncheckedAccount<'info>,
 
     /// Authority: employer (no confirmation required for partials, because
     /// employer is volunteering to pay out mid-work) OR platform_authority.
@@ -47,27 +44,26 @@ pub struct ReleasePartialSol<'info> {
     pub system_program: Program<'info, System>,
 }
 
-/// Release `amount` to employee now, plus a proportional commission to the
-/// platform. The remainder stays in escrow, status stays `Funded` unless this
-/// slice exhausts the worker amount (then it flips to `Released` and the
-/// vault is fully drained, including any dust).
+/// Release `amount` to the employee plus a proportional commission; the final
+/// slice flips the escrow to `Released` and drains the vault entirely.
 ///
-/// Commission for the slice is computed as the **delta** between cumulative-
-/// due before and after the partial — never as a per-slice independent
-/// floor — so the sum of partial commissions equals the single-release
-/// commission for the same total amount.
-///
-/// For non-final partials, the post-slice vault balance must be either 0
-/// or above the rent-exempt minimum (Solana's transfer rule). Otherwise the
-/// instruction errors with `PartialReleaseLeavesDust`. The full release
-/// path doesn't have this restriction because it drains the vault entirely.
-pub fn handler(ctx: Context<ReleasePartialSol>, amount: u64) -> Result<()> {
+/// Commission is the **delta** of cumulative-due before vs. after the slice,
+/// so the sum of partial commissions equals the single-release commission for
+/// the same total. Non-final slices must leave the vault at 0 or above the
+/// rent-exempt minimum, else `PartialReleaseLeavesDust`.
+pub fn handler(ctx: Context<ReleasePartialSol>, amount: u64, ref_id: [u8; 32]) -> Result<()> {
     let escrow = &mut ctx.accounts.escrow;
     let authority_key = ctx.accounts.authority.key();
 
     let is_employer = authority_key == escrow.employer;
     let is_platform = authority_key == escrow.platform_authority;
-    require!(is_employer || is_platform, EscrowError::ReleaseNotAuthorized);
+    // Employee may self-draw only after both parties have confirmed completion.
+    let is_employee =
+        authority_key == escrow.employee && escrow.employer_confirmed && escrow.employee_confirmed;
+    require!(
+        is_employer || is_platform || is_employee,
+        EscrowError::ReleaseNotAuthorized
+    );
 
     require!(amount > 0, EscrowError::InvalidAmount);
 
@@ -144,7 +140,7 @@ pub fn handler(ctx: Context<ReleasePartialSol>, amount: u64) -> Result<()> {
                 ctx.accounts.system_program.to_account_info(),
                 Transfer {
                     from: ctx.accounts.escrow_vault.to_account_info(),
-                    to: ctx.accounts.platform_authority.to_account_info(),
+                    to: ctx.accounts.fee_recipient.to_account_info(),
                 },
                 signer_seeds,
             ),
@@ -166,12 +162,13 @@ pub fn handler(ctx: Context<ReleasePartialSol>, amount: u64) -> Result<()> {
         recipient: escrow.employee,
         amount,
         commission_amount: platform_payment,
-        commission_recipient: escrow.platform_authority,
+        commission_recipient: escrow.fee_recipient,
         is_native: true,
         token_mint: escrow.token_mint,
         initiator: authority_key,
         is_partial: !is_final,
         remaining_worker_amount: new_remaining,
+        ref_id,
     });
 
     msg!(

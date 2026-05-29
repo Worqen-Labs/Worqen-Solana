@@ -1,22 +1,24 @@
 use crate::errors::EscrowError;
-use crate::events::DisputeResolved;
+use crate::events::EscrowSettled;
 use crate::state::{Escrow, EscrowStatus};
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
-/// Accounts for resolving a token dispute. Token accounts are constrained on
-/// mint and owner to prevent fund redirection; party ATAs use `init_if_needed`
-/// (platform pays, refundable via `close_escrow_token`) so 0-balance parties
-/// can still receive their shares.
+/// Accounts for an amicable settle of a token escrow.
+///
+/// Both parties sign (no platform authority). Token accounts are constrained
+/// on `mint`/`owner` to prevent fund redirection; payee ATAs use
+/// `init_if_needed` so a 0-balance party can still receive its share.
 #[derive(Accounts)]
-pub struct ResolveDisputeToken<'info> {
-    /// The escrow account
+pub struct MutualCancelToken<'info> {
     #[account(
         mut,
-        constraint = escrow.status == EscrowStatus::Disputed @ EscrowError::InvalidStatus,
+        constraint = escrow.status == EscrowStatus::Funded
+            || escrow.status == EscrowStatus::PendingRelease @ EscrowError::InvalidStatus,
         constraint = !escrow.is_native @ EscrowError::NotTokenEscrow,
-        constraint = escrow.platform_authority == platform_authority.key() @ EscrowError::Unauthorized,
+        constraint = escrow.employer == employer.key() @ EscrowError::Unauthorized,
+        constraint = escrow.employee == employee.key() @ EscrowError::Unauthorized,
     )]
     pub escrow: Box<Account<'info, Escrow>>,
 
@@ -32,48 +34,43 @@ pub struct ResolveDisputeToken<'info> {
     )]
     pub vault_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// CHECK: Verified against escrow.employer
-    #[account(constraint = employer.key() == escrow.employer @ EscrowError::Unauthorized)]
-    pub employer: UncheckedAccount<'info>,
+    /// The employer — co-signs the settlement and pays for ATA creation.
+    #[account(mut)]
+    pub employer: Signer<'info>,
 
     #[account(
         init_if_needed,
-        payer = platform_authority,
+        payer = employer,
         associated_token::mint = token_mint,
         associated_token::authority = employer,
     )]
     pub employer_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// CHECK: Verified against escrow.employee
-    #[account(constraint = employee.key() == escrow.employee @ EscrowError::Unauthorized)]
-    pub employee: UncheckedAccount<'info>,
+    /// The employee — co-signs the settlement.
+    pub employee: Signer<'info>,
 
     #[account(
         init_if_needed,
-        payer = platform_authority,
+        payer = employer,
         associated_token::mint = token_mint,
         associated_token::authority = employee,
     )]
     pub employee_token_account: Box<Account<'info, TokenAccount>>,
-
-    /// The platform authority — pays for ATA creation if needed.
-    #[account(mut)]
-    pub platform_authority: Signer<'info>,
 
     pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
 }
 
-/// Platform resolves dispute by splitting remaining worker amount.
-/// Commission proportional to remaining worker is refunded to employer.
-/// Vault is drained to actual balance (sweeps any dust to employer).
-pub fn handler(ctx: Context<ResolveDisputeToken>, employee_share: u64) -> Result<()> {
+/// Employer + employee amicably settle a funded token escrow without a
+/// dispute. `employee_share` (<= remaining worker amount) goes to the
+/// employee; the rest — employer's portion plus the proportional
+/// commission refund plus any dust — drains back to the employer.
+pub fn handler(ctx: Context<MutualCancelToken>, employee_share: u64) -> Result<()> {
     let escrow = &mut ctx.accounts.escrow;
     let clock = Clock::get()?;
 
     let remaining_worker = escrow.remaining_worker_amount();
-    let remaining_commission = escrow.remaining_commission();
 
     require!(
         employee_share <= remaining_worker,
@@ -87,7 +84,6 @@ pub fn handler(ctx: Context<ResolveDisputeToken>, employee_share: u64) -> Result
     let escrow_seeds = &[Escrow::ESCROW_SEED, escrow_id.as_ref(), &[bump]];
     let signer_seeds = &[&escrow_seeds[..]];
 
-    // Pay worker their share first.
     if employee_share > 0 {
         token::transfer(
             CpiContext::new_with_signer(
@@ -104,7 +100,7 @@ pub fn handler(ctx: Context<ResolveDisputeToken>, employee_share: u64) -> Result
     }
 
     // Drain remaining vault (employer_share + commission_refund + dust)
-    // to employer's token account.
+    // back to the employer's token account.
     ctx.accounts.vault_token_account.reload()?;
     let total_to_employer = ctx.accounts.vault_token_account.amount;
     if total_to_employer > 0 {
@@ -122,30 +118,27 @@ pub fn handler(ctx: Context<ResolveDisputeToken>, employee_share: u64) -> Result
         )?;
     }
 
-    escrow.released_to_employee = escrow.released_to_employee.saturating_add(employee_share);
+    escrow.released_to_employee = escrow
+        .released_to_employee
+        .checked_add(employee_share)
+        .ok_or(EscrowError::InvalidAmount)?;
     escrow.status = EscrowStatus::Resolved;
     escrow.completed_at = clock.unix_timestamp;
-    escrow.dispute_resolved_by = ctx.accounts.platform_authority.key();
-    escrow.dispute_resolved_at = clock.unix_timestamp;
     escrow.employee_share_resolved = employee_share;
     escrow.employer_share_resolved = employer_share;
 
-    emit!(DisputeResolved {
+    emit!(EscrowSettled {
         escrow_id: escrow.escrow_id,
-        resolver: ctx.accounts.platform_authority.key(),
         employee_share,
         employer_share,
-        commission_refunded: remaining_commission,
         is_native: false,
         token_mint: escrow.token_mint,
-        forced: false,
     });
 
     msg!(
-        "Dispute resolved: {} tokens to employee, {} tokens to employer (incl {} commission refund)",
+        "Mutual settle: {} tokens to employee, {} tokens to employer",
         employee_share,
-        total_to_employer,
-        remaining_commission
+        total_to_employer
     );
 
     Ok(())

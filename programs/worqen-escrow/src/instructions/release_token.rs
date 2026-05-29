@@ -5,19 +5,11 @@ use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
-/// Accounts required for releasing tokens from escrow.
-///
-/// Every token-account input is constrained on both `mint` (must equal
-/// `escrow.token_mint`) and `owner` (must equal the corresponding wallet),
-/// so a malicious authority cannot redirect funds by swapping in a token
-/// account they control.
-///
-/// `employee_token_account` uses `init_if_needed` so a 0-SOL employee can
-/// be paid: the caller (authority) covers the ~0.002 SOL of ATA rent. The
-/// rent is refundable later via `close_escrow_token`.
+/// Accounts for releasing tokens from escrow. Every token account is
+/// constrained on both `mint` and `owner` so a malicious authority cannot
+/// redirect funds by swapping in an account they control.
 #[derive(Accounts)]
 pub struct ReleaseToken<'info> {
-    /// The escrow account
     #[account(
         mut,
         constraint = escrow.status == EscrowStatus::PendingRelease || escrow.status == EscrowStatus::Funded @ EscrowError::InvalidStatus,
@@ -39,13 +31,12 @@ pub struct ReleaseToken<'info> {
     )]
     pub vault_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// The employee pubkey
     /// CHECK: Verified against escrow.employee
     #[account(constraint = employee.key() == escrow.employee @ EscrowError::Unauthorized)]
     pub employee: UncheckedAccount<'info>,
 
-    /// The employee's token account. Created on demand if missing — the
-    /// authority pays the ~0.002 SOL rent. This unblocks 0-SOL employees.
+    /// Employee's ATA, created on demand (authority pays rent) so 0-SOL
+    /// employees can still be paid.
     #[account(
         init_if_needed,
         payer = authority,
@@ -54,23 +45,21 @@ pub struct ReleaseToken<'info> {
     )]
     pub employee_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// The platform authority pubkey
-    /// CHECK: Verified against escrow.platform_authority
-    #[account(constraint = platform_authority.key() == escrow.platform_authority @ EscrowError::Unauthorized)]
-    pub platform_authority: UncheckedAccount<'info>,
+    /// CHECK: Verified against escrow.fee_recipient
+    #[account(constraint = fee_recipient.key() == escrow.fee_recipient @ EscrowError::InvalidFeeRecipient)]
+    pub fee_recipient: UncheckedAccount<'info>,
 
-    /// The platform's token account. Constrained on owner + mint to prevent
+    /// Treasury token account. Constrained on owner + mint to prevent
     /// commission redirection.
     #[account(
         mut,
-        constraint = platform_token_account.owner == escrow.platform_authority @ EscrowError::Unauthorized,
+        constraint = platform_token_account.owner == escrow.fee_recipient @ EscrowError::Unauthorized,
         constraint = platform_token_account.mint == escrow.token_mint @ EscrowError::InvalidTokenMint,
     )]
     pub platform_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// The authority — employer (with confirmation), platform_authority,
-    /// or employee (when both parties confirmed). Pays for ATA init if
-    /// employee_token_account doesn't exist yet.
+    /// Employer (confirmed), platform_authority, or employee (both confirmed).
+    /// Also pays for employee ATA init when needed.
     #[account(mut)]
     pub authority: Signer<'info>,
 
@@ -79,26 +68,17 @@ pub struct ReleaseToken<'info> {
     pub system_program: Program<'info, System>,
 }
 
-/// Releases the remaining tokens in escrow.
-///
-/// Authorization (any one of):
-///   - employer + `employer_confirmed`
-///   - platform_authority
-///   - employee, when both `employer_confirmed` and `employee_confirmed`
-///     are true (worker self-release after mutual agreement)
-///
-/// Drains the vault token account to its actual balance to absorb any
-/// dust transfers; the worker gets their recorded amount, the rest goes
-/// to platform.
-pub fn handler(ctx: Context<ReleaseToken>) -> Result<()> {
+/// Releases the remaining escrowed tokens: worker gets their recorded amount,
+/// the rest of the vault (commission + dust) goes to platform. Authorized for
+/// employer (confirmed), platform_authority, or employee (both parties confirmed).
+pub fn handler(ctx: Context<ReleaseToken>, ref_id: [u8; 32]) -> Result<()> {
     let escrow = &mut ctx.accounts.escrow;
     let authority_key = ctx.accounts.authority.key();
 
     let is_employer_authorized = authority_key == escrow.employer && escrow.employer_confirmed;
     let is_platform_authorized = authority_key == escrow.platform_authority;
-    let is_worker_authorized = authority_key == escrow.employee
-        && escrow.employer_confirmed
-        && escrow.employee_confirmed;
+    let is_worker_authorized =
+        authority_key == escrow.employee && escrow.employer_confirmed && escrow.employee_confirmed;
 
     require!(
         is_employer_authorized || is_platform_authorized || is_worker_authorized,
@@ -157,12 +137,13 @@ pub fn handler(ctx: Context<ReleaseToken>) -> Result<()> {
         recipient: escrow.employee,
         amount: worker_amount,
         commission_amount,
-        commission_recipient: escrow.platform_authority,
+        commission_recipient: escrow.fee_recipient,
         is_native: false,
         token_mint: escrow.token_mint,
         initiator: authority_key,
         is_partial: false,
         remaining_worker_amount: 0,
+        ref_id,
     });
 
     msg!(

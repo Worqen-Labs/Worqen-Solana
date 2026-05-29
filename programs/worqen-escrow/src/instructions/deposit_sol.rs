@@ -1,13 +1,12 @@
-use anchor_lang::prelude::*;
-use anchor_lang::system_program::{transfer, Transfer};
-use crate::state::{Escrow, EscrowStatus};
 use crate::errors::EscrowError;
 use crate::events::EscrowFunded;
+use crate::state::{Escrow, EscrowStatus};
+use anchor_lang::prelude::*;
+use anchor_lang::system_program::{transfer, Transfer};
 
 /// Accounts required for depositing native SOL into escrow
 #[derive(Accounts)]
 pub struct DepositSol<'info> {
-    /// The escrow account
     #[account(
         mut,
         constraint = escrow.status == EscrowStatus::Created @ EscrowError::InvalidStatus,
@@ -16,7 +15,7 @@ pub struct DepositSol<'info> {
     )]
     pub escrow: Account<'info, Escrow>,
 
-    /// The vault PDA that will hold the SOL
+    /// PDA holding the deposited SOL.
     #[account(
         mut,
         seeds = [Escrow::VAULT_SEED, escrow.key().as_ref()],
@@ -25,24 +24,19 @@ pub struct DepositSol<'info> {
     /// CHECK: This is a PDA that holds SOL, no account data
     pub escrow_vault: UncheckedAccount<'info>,
 
-    /// The employer depositing funds
     #[account(mut)]
     pub employer: Signer<'info>,
 
-    /// System program for the transfer
     pub system_program: Program<'info, System>,
 }
 
-/// Deposits native SOL into the escrow vault
-/// Employer deposits: worker_amount + commission_amount
+/// Deposits native SOL (worker amount + commission) into the escrow vault.
 pub fn handler(ctx: Context<DepositSol>) -> Result<()> {
     let escrow = &mut ctx.accounts.escrow;
     let clock = Clock::get()?;
 
-    // Calculate total deposit (worker amount + commission)
-    let total_deposit = escrow.total_deposit();
+    let total_deposit = escrow.total_deposit()?;
 
-    // Transfer SOL from employer to vault
     transfer(
         CpiContext::new(
             ctx.accounts.system_program.to_account_info(),
@@ -54,11 +48,9 @@ pub fn handler(ctx: Context<DepositSol>) -> Result<()> {
         total_deposit,
     )?;
 
-    // Update escrow status
     escrow.status = EscrowStatus::Funded;
     escrow.funded_at = clock.unix_timestamp;
 
-    // Emit event
     emit!(EscrowFunded {
         escrow_id: escrow.escrow_id,
         amount: escrow.amount,

@@ -5,15 +5,10 @@ use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
-/// Token variant of `trigger_auto_release_sol`.
+/// Token variant of `trigger_auto_release_sol`: Disputed-state only.
 ///
-/// **v2 change:** Disputed-state-only. The Funded / PendingRelease branches
-/// are gone — the dispute path covers those cases. See
-/// `trigger_auto_release_sol` for the policy rationale.
-///
-/// All token accounts are constrained on `mint` and `owner`. ATAs are
-/// `init_if_needed` so 0-SOL parties can still receive funds; the caller
-/// pays the rent.
+/// ATAs are `init_if_needed` so parties with no token account can still
+/// receive funds; the caller pays the rent.
 #[derive(Accounts)]
 pub struct TriggerAutoReleaseToken<'info> {
     #[account(
@@ -124,9 +119,7 @@ pub fn handler(ctx: Context<TriggerAutoReleaseToken>) -> Result<()> {
         )?;
     }
 
-    escrow.released_to_employee = escrow
-        .released_to_employee
-        .saturating_add(remaining_worker);
+    escrow.released_to_employee = escrow.released_to_employee.saturating_add(remaining_worker);
     escrow.status = EscrowStatus::Resolved;
     escrow.completed_at = clock.unix_timestamp;
     escrow.dispute_resolved_by = caller_key;

@@ -5,16 +5,13 @@ use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
-/// Accounts required for a partial token release.
-///
-/// All token accounts are constrained on `mint` and `owner` so a malicious
-/// authority cannot redirect funds. `employee_token_account` uses
-/// `init_if_needed` so a 0-SOL employee can receive a partial.
+/// Accounts for a partial token release. Token accounts are constrained on
+/// `mint` and `owner` so a malicious authority cannot redirect funds.
 #[derive(Accounts)]
 pub struct ReleasePartialToken<'info> {
     #[account(
         mut,
-        constraint = escrow.status == EscrowStatus::Funded @ EscrowError::InvalidStatus,
+        constraint = escrow.status == EscrowStatus::Funded || escrow.status == EscrowStatus::PendingRelease @ EscrowError::InvalidStatus,
         constraint = !escrow.is_native @ EscrowError::NotTokenEscrow,
     )]
     pub escrow: Box<Account<'info, Escrow>>,
@@ -43,13 +40,13 @@ pub struct ReleasePartialToken<'info> {
     )]
     pub employee_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// CHECK: Verified against escrow.platform_authority
-    #[account(constraint = platform_authority.key() == escrow.platform_authority @ EscrowError::Unauthorized)]
-    pub platform_authority: UncheckedAccount<'info>,
+    /// CHECK: Verified against escrow.fee_recipient (treasury)
+    #[account(constraint = fee_recipient.key() == escrow.fee_recipient @ EscrowError::InvalidFeeRecipient)]
+    pub fee_recipient: UncheckedAccount<'info>,
 
     #[account(
         mut,
-        constraint = platform_token_account.owner == escrow.platform_authority @ EscrowError::Unauthorized,
+        constraint = platform_token_account.owner == escrow.fee_recipient @ EscrowError::Unauthorized,
         constraint = platform_token_account.mint == escrow.token_mint @ EscrowError::InvalidTokenMint,
     )]
     pub platform_token_account: Box<Account<'info, TokenAccount>>,
@@ -62,13 +59,18 @@ pub struct ReleasePartialToken<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn handler(ctx: Context<ReleasePartialToken>, amount: u64) -> Result<()> {
+pub fn handler(ctx: Context<ReleasePartialToken>, amount: u64, ref_id: [u8; 32]) -> Result<()> {
     let escrow = &mut ctx.accounts.escrow;
     let authority_key = ctx.accounts.authority.key();
 
     let is_employer = authority_key == escrow.employer;
     let is_platform = authority_key == escrow.platform_authority;
-    require!(is_employer || is_platform, EscrowError::ReleaseNotAuthorized);
+    let is_employee =
+        authority_key == escrow.employee && escrow.employer_confirmed && escrow.employee_confirmed;
+    require!(
+        is_employer || is_platform || is_employee,
+        EscrowError::ReleaseNotAuthorized
+    );
 
     require!(amount > 0, EscrowError::InvalidAmount);
 
@@ -95,7 +97,6 @@ pub fn handler(ctx: Context<ReleasePartialToken>, amount: u64) -> Result<()> {
     let escrow_seeds = &[Escrow::ESCROW_SEED, escrow_id.as_ref(), &[bump]];
     let signer_seeds = &[&escrow_seeds[..]];
 
-    // Worker leg
     token::transfer(
         CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
@@ -149,12 +150,13 @@ pub fn handler(ctx: Context<ReleasePartialToken>, amount: u64) -> Result<()> {
         recipient: escrow.employee,
         amount,
         commission_amount: platform_payment,
-        commission_recipient: escrow.platform_authority,
+        commission_recipient: escrow.fee_recipient,
         is_native: false,
         token_mint: escrow.token_mint,
         initiator: authority_key,
         is_partial: !is_final,
         remaining_worker_amount: new_remaining,
+        ref_id,
     });
 
     msg!(

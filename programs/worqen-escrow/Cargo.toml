@@ -24,3 +24,11 @@ default = []
 anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
 anchor-spl = { version = "0.32.1", features = ["token", "associated_token"] }
 solana-security-txt = "1.1.1"
+
+# Declare the cfgs emitted by the Anchor + Solana toolchain so `cargo check`,
+# `clippy`, and CI stay warning-clean without CLI `-A` flags.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(target_os, values("solana"))',
+    'cfg(feature, values("anchor-debug", "custom-heap", "custom-panic"))',
+] }

@@ -1,7 +1,7 @@
-use anchor_lang::prelude::*;
-use crate::state::{Escrow, EscrowStatus};
 use crate::errors::EscrowError;
 use crate::events::CompletionConfirmed;
+use crate::state::{Escrow, EscrowStatus};
+use anchor_lang::prelude::*;
 
 /// Accounts required for confirming completion
 #[derive(Accounts)]
@@ -22,13 +22,11 @@ pub fn handler(ctx: Context<ConfirmCompletion>) -> Result<()> {
     let escrow = &mut ctx.accounts.escrow;
     let signer_key = ctx.accounts.signer.key();
 
-    // Verify signer is employer or employee
     require!(
         signer_key == escrow.employer || signer_key == escrow.employee,
         EscrowError::Unauthorized
     );
 
-    // Set confirmation based on who signed
     if signer_key == escrow.employer {
         require!(!escrow.employer_confirmed, EscrowError::AlreadyConfirmed);
         escrow.employer_confirmed = true;
@@ -37,12 +35,11 @@ pub fn handler(ctx: Context<ConfirmCompletion>) -> Result<()> {
         escrow.employee_confirmed = true;
     }
 
-    // Move to PendingRelease on first confirmation
+    // First confirmation advances the escrow to PendingRelease.
     if escrow.status == EscrowStatus::Funded {
         escrow.status = EscrowStatus::PendingRelease;
     }
 
-    // Emit event
     emit!(CompletionConfirmed {
         escrow_id: escrow.escrow_id,
         confirmer: signer_key,

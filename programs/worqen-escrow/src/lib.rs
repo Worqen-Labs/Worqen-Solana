@@ -22,34 +22,66 @@ security_txt! {
     auditors: "Pending external audit"
 }
 
-declare_id!("GDCBqN8AVU5i2xXdeTNwBmCCsd9Y8rfiH1JDKA8UjDYh");
+declare_id!("6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ");
 
-/// Worqen Escrow Program
+/// Trustless payment escrow for the Worqen job marketplace (native SOL and an
+/// allowlisted set of SPL tokens). Employers lock funds when hiring; employees
+/// are paid only after confirmation, with platform-mediated dispute resolution
+/// and a deadline-based force-resolve as a platform-failure safety net.
 ///
-/// Provides trustless payment escrow for the Worqen job marketplace.
-/// Supports native SOL and any SPL token. Employers lock funds when hiring;
-/// employees are paid only after confirmation, with platform-mediated
-/// dispute resolution and a deadline-based force-resolve as a safety net
-/// for platform failure.
-///
-/// **Account schema:** see `state::Escrow` (`ESCROW_ACCOUNT_VERSION = 2`).
-/// v2 semantics:
-///   - Employer can no longer cancel a `Funded` escrow.
-///   - Worker can self-release once both parties have confirmed.
-///   - `dispute_deadline` is mandatory and bounded to 90 days.
-///   - `auto_release_at` no longer triggers releases from
-///     `Funded`/`PendingRelease`. Force-resolve only fires from `Disputed`.
-///   - All token destinations are constrained on `mint` and `owner`.
-///   - SOL release / resolve / auto-release drain the actual vault balance
-///     to defend against dust DoS.
-///   - `close_escrow_*` reclaims rent on terminal escrows.
+/// Key invariants: commission is fee-on-top (employer pays `amount + commission`,
+/// employee receives the full `amount`, commission goes to a per-escrow
+/// `fee_recipient`); pause blocks only new money, never releases/disputes/closes;
+/// token destinations are constrained on `mint`/`owner` and SOL paths drain the
+/// actual vault balance (dust-DoS safe). Account schema: `state::Escrow`.
 #[program]
 pub mod worqen_escrow {
     use super::*;
 
+    /// Initialize the singleton global Config (admin signs + pays rent).
+    pub fn init_config(
+        ctx: Context<InitConfig>,
+        fee_recipient: Pubkey,
+        default_commission_bps: u16,
+        allowed_mints: Vec<Pubkey>,
+    ) -> Result<()> {
+        instructions::config::init_config(ctx, fee_recipient, default_commission_bps, allowed_mints)
+    }
+
+    /// Update Config fields (current authority signs). Any `None` is left
+    /// unchanged. Setting `new_pending_authority` starts a two-step handoff.
+    pub fn update_config(
+        ctx: Context<UpdateConfig>,
+        new_fee_recipient: Option<Pubkey>,
+        new_default_commission_bps: Option<u16>,
+        new_paused: Option<bool>,
+        new_pending_authority: Option<Pubkey>,
+    ) -> Result<()> {
+        instructions::config::update_config(
+            ctx,
+            new_fee_recipient,
+            new_default_commission_bps,
+            new_paused,
+            new_pending_authority,
+        )
+    }
+
+    /// Accept a pending authority handoff (the pending authority signs).
+    pub fn accept_authority(ctx: Context<AcceptAuthority>) -> Result<()> {
+        instructions::config::accept_authority(ctx)
+    }
+
+    /// Add an SPL mint to the allowlist (authority signs).
+    pub fn add_allowed_mint(ctx: Context<UpdateAllowlist>, mint: Pubkey) -> Result<()> {
+        instructions::config::add_allowed_mint(ctx, mint)
+    }
+
+    /// Remove an SPL mint from the allowlist (authority signs).
+    pub fn remove_allowed_mint(ctx: Context<UpdateAllowlist>, mint: Pubkey) -> Result<()> {
+        instructions::config::remove_allowed_mint(ctx, mint)
+    }
+
     /// Create a new escrow account for a hire or milestone.
-    ///
-    /// See `instructions::create_escrow` for full argument docs.
     #[allow(clippy::too_many_arguments)]
     pub fn create_escrow(
         ctx: Context<CreateEscrow>,
@@ -61,6 +93,8 @@ pub mod worqen_escrow {
         is_native: bool,
         commission_rate_bps: u16,
         auto_release_at: i64,
+        escrow_kind: u8,
+        terms_hash: [u8; 32],
     ) -> Result<()> {
         instructions::create_escrow::handler(
             ctx,
@@ -72,6 +106,8 @@ pub mod worqen_escrow {
             is_native,
             commission_rate_bps,
             auto_release_at,
+            escrow_kind,
+            terms_hash,
         )
     }
 
@@ -90,31 +126,36 @@ pub mod worqen_escrow {
         instructions::confirm_completion::handler(ctx)
     }
 
-    /// Release the remaining SOL to the employee (+ commission to platform).
-    pub fn release_sol(ctx: Context<ReleaseSol>) -> Result<()> {
-        instructions::release_sol::handler(ctx)
+    /// Release the remaining SOL to the employee (+ commission to treasury).
+    pub fn release_sol(ctx: Context<ReleaseSol>, ref_id: [u8; 32]) -> Result<()> {
+        instructions::release_sol::handler(ctx, ref_id)
     }
 
     /// Release the remaining SPL tokens to the employee (+ commission).
-    pub fn release_token(ctx: Context<ReleaseToken>) -> Result<()> {
-        instructions::release_token::handler(ctx)
+    pub fn release_token(ctx: Context<ReleaseToken>, ref_id: [u8; 32]) -> Result<()> {
+        instructions::release_token::handler(ctx, ref_id)
     }
 
     /// Release `amount` SOL to employee now, keeping the rest escrowed.
-    /// Proportional commission is paid to platform.
-    pub fn release_partial_sol(ctx: Context<ReleasePartialSol>, amount: u64) -> Result<()> {
-        instructions::release_partial_sol::handler(ctx, amount)
+    pub fn release_partial_sol(
+        ctx: Context<ReleasePartialSol>,
+        amount: u64,
+        ref_id: [u8; 32],
+    ) -> Result<()> {
+        instructions::release_partial_sol::handler(ctx, amount, ref_id)
     }
 
     /// Release `amount` SPL tokens to employee now, keeping the rest.
     pub fn release_partial_token(
         ctx: Context<ReleasePartialToken>,
         amount: u64,
+        ref_id: [u8; 32],
     ) -> Result<()> {
-        instructions::release_partial_token::handler(ctx, amount)
+        instructions::release_partial_token::handler(ctx, amount, ref_id)
     }
 
-    /// Raise a dispute, freezing funds. Optionally set a deadline.
+    /// Raise a dispute, freezing funds. `dispute_deadline` is mandatory and
+    /// must be within [now + 3 days, now + 90 days].
     pub fn raise_dispute(
         ctx: Context<RaiseDispute>,
         reason: Vec<u8>,
@@ -124,10 +165,7 @@ pub mod worqen_escrow {
     }
 
     /// Platform resolves a dispute by splitting the remaining worker amount.
-    pub fn resolve_dispute_sol(
-        ctx: Context<ResolveDisputeSol>,
-        employee_share: u64,
-    ) -> Result<()> {
+    pub fn resolve_dispute_sol(ctx: Context<ResolveDisputeSol>, employee_share: u64) -> Result<()> {
         instructions::resolve_dispute_sol::handler(ctx, employee_share)
     }
 
@@ -139,58 +177,59 @@ pub mod worqen_escrow {
         instructions::resolve_dispute_token::handler(ctx, employee_share)
     }
 
-    /// Cancel a SOL escrow (employer or platform), full refund to employer.
-    pub fn cancel_escrow_sol(
-        ctx: Context<CancelEscrowSol>,
-        reason: Vec<u8>,
-    ) -> Result<()> {
+    /// Cancel a SOL escrow. Employer may cancel only in `Created`; platform
+    /// may cancel in `Created` or `Funded`. Full refund to employer.
+    pub fn cancel_escrow_sol(ctx: Context<CancelEscrowSol>, reason: Vec<u8>) -> Result<()> {
         instructions::cancel_escrow_sol::handler(ctx, reason)
     }
 
-    /// Cancel a token escrow, full refund to employer.
-    pub fn cancel_escrow_token(
-        ctx: Context<CancelEscrowToken>,
-        reason: Vec<u8>,
-    ) -> Result<()> {
+    /// Cancel a token escrow. Same rules as `cancel_escrow_sol`.
+    pub fn cancel_escrow_token(ctx: Context<CancelEscrowToken>, reason: Vec<u8>) -> Result<()> {
         instructions::cancel_escrow_token::handler(ctx, reason)
     }
 
-    /// Anyone can trigger this after `auto_release_at` (Funded/PendingRelease)
-    /// or after `dispute_deadline` (Disputed). Prevents stuck funds.
+    /// Permissionless force-resolve of a `Disputed` escrow after
+    /// `dispute_deadline`. Pays the worker their remaining amount.
     pub fn trigger_auto_release_sol(ctx: Context<TriggerAutoReleaseSol>) -> Result<()> {
         instructions::trigger_auto_release_sol::handler(ctx)
     }
 
-    /// Token variant of trigger_auto_release_sol.
+    /// Token variant of `trigger_auto_release_sol`.
     pub fn trigger_auto_release_token(ctx: Context<TriggerAutoReleaseToken>) -> Result<()> {
         instructions::trigger_auto_release_token::handler(ctx)
     }
 
     /// Rotate the escrow's platform_authority (current authority signs).
-    /// Blocked while status == Disputed (v2).
+    /// Blocked while `Disputed`; the new authority must differ from the
+    /// current one and from employer/employee.
     pub fn update_platform_authority(ctx: Context<UpdatePlatformAuthority>) -> Result<()> {
         instructions::update_platform_authority::handler(ctx)
     }
 
-    /// Close a terminal SOL escrow and refund storage rent (~0.005 SOL)
-    /// plus any vault dust to the employer. Allowed in Released / Resolved /
-    /// Cancelled. Signed by employer or platform_authority.
+    /// Close a terminal SOL escrow and refund rent + vault dust to employer.
     pub fn close_escrow_sol(ctx: Context<CloseEscrowSol>) -> Result<()> {
         instructions::close_escrow_sol::handler(ctx)
     }
 
-    /// Close a terminal token escrow: sweeps any residual tokens to the
-    /// employer's ATA, closes the vault token account (~0.002 SOL rent),
-    /// and closes the escrow account (~0.005 SOL rent). All rent goes to
-    /// employer. Signed by employer or platform_authority.
+    /// Close a terminal token escrow, sweep residual tokens, refund all rent.
     pub fn close_escrow_token(ctx: Context<CloseEscrowToken>) -> Result<()> {
         instructions::close_escrow_token::handler(ctx)
     }
 
-    /// Direct one-shot SOL payment with platform commission. No escrow,
-    /// no lock, no state — just an atomic split transfer. Use for trusted
-    /// hires, tips, recurring invoice settlement, or any "pay now, track
-    /// off-chain" flow where the platform still needs its cut.
+    /// Close a never-funded (Cancelled-from-Created) SOL escrow to reclaim
+    /// its account rent. No vault is involved.
+    pub fn close_unfunded_escrow_sol(ctx: Context<CloseUnfundedEscrowSol>) -> Result<()> {
+        instructions::close_unfunded_escrow_sol::handler(ctx)
+    }
+
+    /// Token variant: close a never-funded escrow (no vault ATA was created).
+    pub fn close_unfunded_escrow_token(ctx: Context<CloseUnfundedEscrowToken>) -> Result<()> {
+        instructions::close_unfunded_escrow_token::handler(ctx)
+    }
+
+    /// Direct one-shot SOL payment with platform commission (fee-on-top).
+    /// No escrow, no lock — an atomic split. For trusted hires, tips, and
+    /// approved-invoice settlement. Subject to the mint allowlist + pause.
     pub fn pay_with_commission_sol(
         ctx: Context<PayWithCommissionSol>,
         hire_id: [u8; 32],
@@ -200,8 +239,7 @@ pub mod worqen_escrow {
         instructions::pay_with_commission_sol::handler(ctx, hire_id, amount, commission_bps)
     }
 
-    /// Token variant of `pay_with_commission_sol`. Source/destination ATAs
-    /// must exist — create them idempotently in a preceding instruction.
+    /// Token variant of `pay_with_commission_sol`.
     pub fn pay_with_commission_token(
         ctx: Context<PayWithCommissionToken>,
         hire_id: [u8; 32],
@@ -209,5 +247,60 @@ pub mod worqen_escrow {
         commission_bps: u16,
     ) -> Result<()> {
         instructions::pay_with_commission_token::handler(ctx, hire_id, amount, commission_bps)
+    }
+
+    /// Top up a Funded SOL escrow (retainer/hourly): raises amount +
+    /// commission and moves the delta into the vault. Employer signs.
+    pub fn deposit_more_sol(ctx: Context<DepositMoreSol>, additional_amount: u64) -> Result<()> {
+        instructions::deposit_more_sol::handler(ctx, additional_amount)
+    }
+
+    /// Token variant of `deposit_more_sol`.
+    pub fn deposit_more_token(
+        ctx: Context<DepositMoreToken>,
+        additional_amount: u64,
+    ) -> Result<()> {
+        instructions::deposit_more_token::handler(ctx, additional_amount)
+    }
+
+    /// Direct pay (fee-on-top) split across many recipients in one atomic tx
+    /// (teams / referral fees). Recipient SOL accounts are passed via
+    /// remaining_accounts; `amounts[i]` is recipient i's net; one commission on
+    /// the total goes to the treasury. Subject to the pause switch.
+    pub fn batch_pay_with_commission_sol<'info>(
+        ctx: Context<'_, '_, 'info, 'info, BatchPayWithCommissionSol<'info>>,
+        hire_id: [u8; 32],
+        amounts: Vec<u64>,
+        commission_bps: u16,
+    ) -> Result<()> {
+        instructions::batch_pay_with_commission_sol::handler(ctx, hire_id, amounts, commission_bps)
+    }
+
+    /// Token variant: recipient ATAs passed via remaining_accounts.
+    pub fn batch_pay_with_commission_token<'info>(
+        ctx: Context<'_, '_, 'info, 'info, BatchPayWithCommissionToken<'info>>,
+        hire_id: [u8; 32],
+        amounts: Vec<u64>,
+        commission_bps: u16,
+    ) -> Result<()> {
+        instructions::batch_pay_with_commission_token::handler(
+            ctx,
+            hire_id,
+            amounts,
+            commission_bps,
+        )
+    }
+
+    /// Amicable settle of a non-terminal SOL escrow WITHOUT a dispute. Both
+    /// employer AND employee sign; `employee_share` (<= remaining worker
+    /// amount) goes to the employee, the rest (incl. commission) refunds to
+    /// the employer.
+    pub fn mutual_cancel_sol(ctx: Context<MutualCancelSol>, employee_share: u64) -> Result<()> {
+        instructions::mutual_cancel_sol::handler(ctx, employee_share)
+    }
+
+    /// Token variant of `mutual_cancel_sol`.
+    pub fn mutual_cancel_token(ctx: Context<MutualCancelToken>, employee_share: u64) -> Result<()> {
+        instructions::mutual_cancel_token::handler(ctx, employee_share)
     }
 }

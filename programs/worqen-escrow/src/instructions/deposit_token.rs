@@ -1,9 +1,9 @@
-use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Token, TokenAccount, Mint, Transfer};
-use anchor_spl::associated_token::AssociatedToken;
-use crate::state::{Escrow, EscrowStatus};
 use crate::errors::EscrowError;
 use crate::events::EscrowFunded;
+use crate::state::{Escrow, EscrowStatus};
+use anchor_lang::prelude::*;
+use anchor_spl::associated_token::AssociatedToken;
+use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 /// Accounts required for depositing SPL tokens into escrow
 #[derive(Accounts)]
@@ -18,7 +18,7 @@ pub struct DepositToken<'info> {
     )]
     pub escrow: Box<Account<'info, Escrow>>,
 
-    /// The vault token account (created if needed)
+    /// Escrow-owned vault holding the deposited tokens; created on first deposit.
     #[account(
         init_if_needed,
         payer = employer,
@@ -52,16 +52,13 @@ pub struct DepositToken<'info> {
     pub system_program: Program<'info, System>,
 }
 
-/// Deposits SPL tokens into the escrow vault
-/// Employer deposits: worker_amount + commission_amount
+/// Deposits SPL tokens (worker amount + commission) into the escrow vault.
 pub fn handler(ctx: Context<DepositToken>) -> Result<()> {
     let escrow = &mut ctx.accounts.escrow;
     let clock = Clock::get()?;
 
-    // Calculate total deposit (worker amount + commission)
-    let total_deposit = escrow.total_deposit();
+    let total_deposit = escrow.total_deposit()?;
 
-    // Transfer tokens from employer to vault
     token::transfer(
         CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
@@ -74,11 +71,9 @@ pub fn handler(ctx: Context<DepositToken>) -> Result<()> {
         total_deposit,
     )?;
 
-    // Update escrow status
     escrow.status = EscrowStatus::Funded;
     escrow.funded_at = clock.unix_timestamp;
 
-    // Emit event
     emit!(EscrowFunded {
         escrow_id: escrow.escrow_id,
         amount: escrow.amount,

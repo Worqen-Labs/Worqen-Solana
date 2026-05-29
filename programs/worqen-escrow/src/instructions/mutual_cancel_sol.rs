@@ -1,17 +1,20 @@
 use crate::errors::EscrowError;
-use crate::events::DisputeResolved;
+use crate::events::EscrowSettled;
 use crate::state::{Escrow, EscrowStatus};
 use anchor_lang::prelude::*;
 use anchor_lang::system_program::{transfer, Transfer};
 
-/// Accounts required for resolving a SOL dispute.
+/// Accounts for an amicable (mutual) cancellation of a SOL escrow. Both
+/// parties sign, so the split is jointly authorized without platform involvement.
 #[derive(Accounts)]
-pub struct ResolveDisputeSol<'info> {
+pub struct MutualCancelSol<'info> {
     #[account(
         mut,
-        constraint = escrow.status == EscrowStatus::Disputed @ EscrowError::InvalidStatus,
+        constraint = escrow.status == EscrowStatus::Funded
+            || escrow.status == EscrowStatus::PendingRelease @ EscrowError::InvalidStatus,
         constraint = escrow.is_native @ EscrowError::NotNativeEscrow,
-        constraint = escrow.platform_authority == platform_authority.key() @ EscrowError::Unauthorized,
+        constraint = escrow.employer == employer.key() @ EscrowError::Unauthorized,
+        constraint = escrow.employee == employee.key() @ EscrowError::Unauthorized,
     )]
     pub escrow: Account<'info, Escrow>,
 
@@ -23,39 +26,31 @@ pub struct ResolveDisputeSol<'info> {
     /// CHECK: This is a PDA that holds SOL
     pub escrow_vault: UncheckedAccount<'info>,
 
-    /// Receives the employer share plus the proportional commission refund.
-    #[account(
-        mut,
-        constraint = employer.key() == escrow.employer @ EscrowError::Unauthorized,
-    )]
-    /// CHECK: Verified against escrow.employer
-    pub employer: UncheckedAccount<'info>,
+    /// The employer — signs to authorize the split and receives their share
+    /// (plus the commission refund and any dust drained from the vault).
+    #[account(mut)]
+    pub employer: Signer<'info>,
 
-    #[account(
-        mut,
-        constraint = employee.key() == escrow.employee @ EscrowError::Unauthorized,
-    )]
-    /// CHECK: Verified against escrow.employee
-    pub employee: UncheckedAccount<'info>,
+    /// The employee — signs to authorize the split and receives their share.
+    #[account(mut)]
+    pub employee: Signer<'info>,
 
-    pub platform_authority: Signer<'info>,
-
+    /// System program
     pub system_program: Program<'info, System>,
 }
 
-/// Platform splits the remaining worker payment between parties; commission is
-/// refunded to the employer (platform forfeits commission on dispute).
+/// Employer + employee mutually cancel a funded escrow, splitting the remaining
+/// worker payment between themselves; commission is refunded to the employer.
 ///
-/// The vault is drained to its actual balance rather than recorded amounts, so
-/// any dust deposit is swept to the employer — avoiding a rent-exempt-min DoS
-/// that would otherwise brick resolve. `employee_share` is the lamports paid to
-/// the employee; the remainder (plus dust and commission) goes to the employer.
-pub fn handler(ctx: Context<ResolveDisputeSol>, employee_share: u64) -> Result<()> {
+/// The vault is drained to its actual balance (not the recorded amounts), so the
+/// commission refund and any dust sweep to the employer — avoiding a rent-exempt-min
+/// DoS and leaving the vault at exactly 0. `employee_share` is the lamports sent to
+/// the employee; `employer_share = remaining_worker - employee_share`.
+pub fn handler(ctx: Context<MutualCancelSol>, employee_share: u64) -> Result<()> {
     let escrow = &mut ctx.accounts.escrow;
     let clock = Clock::get()?;
 
     let remaining_worker = escrow.remaining_worker_amount();
-    let remaining_commission = escrow.remaining_commission();
 
     require!(
         employee_share <= remaining_worker,
@@ -72,6 +67,7 @@ pub fn handler(ctx: Context<ResolveDisputeSol>, employee_share: u64) -> Result<(
     ];
     let signer_seeds = &[&vault_seeds[..]];
 
+    // Pay the worker their agreed share first.
     if employee_share > 0 {
         transfer(
             CpiContext::new_with_signer(
@@ -103,30 +99,27 @@ pub fn handler(ctx: Context<ResolveDisputeSol>, employee_share: u64) -> Result<(
         )?;
     }
 
-    escrow.released_to_employee = escrow.released_to_employee.saturating_add(employee_share);
+    escrow.released_to_employee = escrow
+        .released_to_employee
+        .checked_add(employee_share)
+        .ok_or(EscrowError::InvalidAmount)?;
     escrow.status = EscrowStatus::Resolved;
     escrow.completed_at = clock.unix_timestamp;
-    escrow.dispute_resolved_by = ctx.accounts.platform_authority.key();
-    escrow.dispute_resolved_at = clock.unix_timestamp;
     escrow.employee_share_resolved = employee_share;
     escrow.employer_share_resolved = employer_share;
 
-    emit!(DisputeResolved {
+    emit!(EscrowSettled {
         escrow_id: escrow.escrow_id,
-        resolver: ctx.accounts.platform_authority.key(),
         employee_share,
         employer_share,
-        commission_refunded: remaining_commission,
         is_native: true,
         token_mint: escrow.token_mint,
-        forced: false,
     });
 
     msg!(
-        "Dispute resolved: {} to employee, {} to employer (incl {} commission refund)",
+        "Escrow settled: {} to employee, {} to employer (incl commission refund)",
         employee_share,
-        total_to_employer,
-        remaining_commission
+        total_to_employer
     );
 
     Ok(())

@@ -13,7 +13,6 @@ use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 /// Token accounts are constrained on `mint` and `owner` to block redirection.
 #[derive(Accounts)]
 pub struct CancelEscrowToken<'info> {
-    /// The escrow account
     #[account(
         mut,
         constraint = escrow.status == EscrowStatus::Created || escrow.status == EscrowStatus::Funded @ EscrowError::InvalidStatus,
@@ -21,7 +20,6 @@ pub struct CancelEscrowToken<'info> {
     )]
     pub escrow: Box<Account<'info, Escrow>>,
 
-    /// The vault token account
     #[account(
         mut,
         constraint = vault_token_account.owner == escrow.key() @ EscrowError::Unauthorized,
@@ -45,7 +43,6 @@ pub struct CancelEscrowToken<'info> {
     /// The signer (employer in Created, platform_authority in Funded)
     pub signer: Signer<'info>,
 
-    /// SPL Token program
     pub token_program: Program<'info, Token>,
 }
 
@@ -74,9 +71,6 @@ pub fn handler(ctx: Context<CancelEscrowToken>, reason: Vec<u8>) -> Result<()> {
 
     let clock = Clock::get()?;
     let vault_balance = ctx.accounts.vault_token_account.amount;
-
-    let worker_amount = escrow.amount;
-    let commission_amount = escrow.commission_amount;
 
     let escrow_id = escrow.escrow_id;
     let bump = escrow.bump;
@@ -110,8 +104,8 @@ pub fn handler(ctx: Context<CancelEscrowToken>, reason: Vec<u8>) -> Result<()> {
         escrow_id: escrow.escrow_id,
         cancelled_by: signer_key,
         refunded_to: escrow.employer,
-        amount_refunded: worker_amount,
-        commission_refunded: commission_amount,
+        amount_refunded: escrow.remaining_worker_amount(),
+        commission_refunded: escrow.remaining_commission(),
         is_native: false,
         token_mint: escrow.token_mint,
     });

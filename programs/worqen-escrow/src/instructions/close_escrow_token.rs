@@ -3,25 +3,10 @@ use crate::state::Escrow;
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, CloseAccount, Token, TokenAccount, Transfer};
 
-/// Close a terminal token escrow and refund all rent to the employer.
-///
-/// **Allowed status:** `Released` / `Resolved` / `Cancelled`.
-///
-/// This:
-/// 1. Sweeps any residual tokens from the vault token account into the
-///    employer's token account (covers stray transfers post-release).
-/// 2. Closes the vault token account, refunding ~0.002 SOL of ATA rent
-///    to the employer.
-/// 3. Closes the escrow account, refunding ~0.005 SOL of account rent
-///    to the employer.
-///
-/// Either employer or platform_authority may sign.
-///
-/// **Limitation:** if the escrow was cancelled in `Created` state (vault
-/// was never deposited into and so the vault token account doesn't exist),
-/// this instruction can't be called. Such escrows leak account rent. Token
-/// escrows that were never funded are an unusual flow; if it matters for
-/// your use case, add a separate `close_unfunded_escrow_token` instruction.
+/// Close a terminal token escrow, sweeping residual vault tokens and refunding
+/// all rent (vault ATA + escrow account) to the employer. Signed by employer or
+/// platform_authority. Cannot close escrows cancelled before funding (the vault
+/// token account never existed); such escrows leak account rent.
 #[derive(Accounts)]
 pub struct CloseEscrowToken<'info> {
     #[account(
@@ -70,7 +55,7 @@ pub fn handler(ctx: Context<CloseEscrowToken>) -> Result<()> {
     let escrow_seeds = &[Escrow::ESCROW_SEED, escrow_id.as_ref(), &[bump]];
     let signer_seeds = &[&escrow_seeds[..]];
 
-    // Sweep any residual tokens out of the vault before closing it.
+    // Residual tokens must be swept out before the vault can be closed.
     let vault_balance = ctx.accounts.vault_token_account.amount;
     if vault_balance > 0 {
         token::transfer(

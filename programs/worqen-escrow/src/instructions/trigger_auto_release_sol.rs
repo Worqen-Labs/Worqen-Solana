@@ -4,25 +4,11 @@ use crate::state::{Escrow, EscrowStatus};
 use anchor_lang::prelude::*;
 use anchor_lang::system_program::{transfer, Transfer};
 
-/// Anyone-can-call platform-failure safety net for SOL escrows.
-///
-/// Fires only when:
-///   status == Disputed AND `dispute_deadline` has passed
-///
-/// Force-resolves the dispute in favor of the worker — they receive the
-/// remaining worker amount; commission is refunded to the employer (same
-/// policy as a normal `resolve_dispute_sol`). The platform forfeits
-/// commission on dispute, so it has no perverse incentive to drag out
-/// resolution.
-///
-/// **v2 change:** the Funded / PendingRelease auto-release branches were
-/// removed. The dispute path covers those cases (the worker raises a
-/// dispute if the employer goes silent; the employer raises a dispute if
-/// the worker goes silent). Auto-release is now strictly a safety net for
-/// platform failure, not a default unilateral payout.
-///
-/// The vault is drained to its actual balance, sweeping any dust to the
-/// employer alongside the commission refund.
+/// Anyone-can-call platform-failure safety net for SOL escrows: when a
+/// Disputed escrow's `dispute_deadline` has passed, force-resolves in favor
+/// of the worker (remaining worker amount paid out, commission refunded to
+/// the employer — same policy as `resolve_dispute_sol`). The platform
+/// forfeits commission on dispute, so it has no incentive to stall.
 #[derive(Accounts)]
 pub struct TriggerAutoReleaseSol<'info> {
     #[account(
@@ -88,7 +74,6 @@ pub fn handler(ctx: Context<TriggerAutoReleaseSol>) -> Result<()> {
     let remaining_worker = escrow.remaining_worker_amount();
     let remaining_commission = escrow.remaining_commission();
 
-    // Pay the worker their full remaining amount.
     if remaining_worker > 0 {
         transfer(
             CpiContext::new_with_signer(
@@ -119,9 +104,7 @@ pub fn handler(ctx: Context<TriggerAutoReleaseSol>) -> Result<()> {
         )?;
     }
 
-    escrow.released_to_employee = escrow
-        .released_to_employee
-        .saturating_add(remaining_worker);
+    escrow.released_to_employee = escrow.released_to_employee.saturating_add(remaining_worker);
     escrow.status = EscrowStatus::Resolved;
     escrow.completed_at = clock.unix_timestamp;
     escrow.dispute_resolved_by = caller_key;

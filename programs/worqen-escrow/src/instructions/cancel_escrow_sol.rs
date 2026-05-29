@@ -7,7 +7,6 @@ use anchor_lang::system_program::{transfer, Transfer};
 /// Accounts required for cancelling a SOL escrow
 #[derive(Accounts)]
 pub struct CancelEscrowSol<'info> {
-    /// The escrow account
     #[account(
         mut,
         constraint = escrow.status == EscrowStatus::Created || escrow.status == EscrowStatus::Funded @ EscrowError::InvalidStatus,
@@ -15,7 +14,6 @@ pub struct CancelEscrowSol<'info> {
     )]
     pub escrow: Account<'info, Escrow>,
 
-    /// The vault PDA holding the SOL
     #[account(
         mut,
         seeds = [Escrow::VAULT_SEED, escrow.key().as_ref()],
@@ -24,7 +22,6 @@ pub struct CancelEscrowSol<'info> {
     /// CHECK: This is a PDA that holds SOL
     pub escrow_vault: UncheckedAccount<'info>,
 
-    /// The employer receiving the refund
     #[account(
         mut,
         constraint = employer.key() == escrow.employer @ EscrowError::Unauthorized,
@@ -35,21 +32,14 @@ pub struct CancelEscrowSol<'info> {
     /// The signer (employer or platform authority)
     pub signer: Signer<'info>,
 
-    /// System program
     pub system_program: Program<'info, System>,
 }
 
-/// Cancels escrow and refunds employer (full vault balance).
+/// Cancels a SOL escrow and refunds the employer the full vault balance.
 ///
-/// **v2 authorization rules:**
-/// - In `Created` state (no funds deposited): employer or platform_authority.
-/// - In `Funded` state: **platform_authority only**. The employer cannot
-///   unilaterally pull a funded escrow back — once money is in the vault,
-///   the worker may have started in good faith. The employer must raise
-///   a dispute and have the platform mediate.
-///
-/// # Arguments
-/// * `reason` - UTF-8 cancellation reason (max 128 bytes)
+/// Authorization: in `Created` state, employer or platform_authority; in
+/// `Funded` state, platform_authority only (the employer must dispute rather
+/// than unilaterally reclaiming funds a worker may have started against).
 pub fn handler(ctx: Context<CancelEscrowSol>, reason: Vec<u8>) -> Result<()> {
     let escrow = &mut ctx.accounts.escrow;
     let signer_key = ctx.accounts.signer.key();
@@ -74,9 +64,6 @@ pub fn handler(ctx: Context<CancelEscrowSol>, reason: Vec<u8>) -> Result<()> {
 
     let clock = Clock::get()?;
     let vault_balance = ctx.accounts.escrow_vault.lamports();
-
-    let worker_amount = escrow.amount;
-    let commission_amount = escrow.commission_amount;
 
     let escrow_key = escrow.key();
     let vault_seeds = &[
@@ -112,8 +99,8 @@ pub fn handler(ctx: Context<CancelEscrowSol>, reason: Vec<u8>) -> Result<()> {
         escrow_id: escrow.escrow_id,
         cancelled_by: signer_key,
         refunded_to: escrow.employer,
-        amount_refunded: worker_amount,
-        commission_refunded: commission_amount,
+        amount_refunded: escrow.remaining_worker_amount(),
+        commission_refunded: escrow.remaining_commission(),
         is_native: true,
         token_mint: escrow.token_mint,
     });

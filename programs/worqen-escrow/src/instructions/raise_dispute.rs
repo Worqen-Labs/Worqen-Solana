@@ -19,26 +19,11 @@ pub struct RaiseDispute<'info> {
 
 /// Raises a dispute, freezing funds.
 ///
-/// **Authorization rules:**
-/// - In `Funded` state: employer or worker may dispute.
-/// - In `PendingRelease` state: only the employer may dispute. Once a party
-///   has confirmed completion, the worker is committed and cannot back out;
-///   the employer keeps a window in case they spot something post-confirm.
-///
-/// **dispute_deadline is now mandatory.** Passing 0 used to mean "never
-/// expires," which removed the platform-failure safety net entirely. v2
-/// requires a real value bounded by `MAX_DISPUTE_DEADLINE_DURATION` (90
-/// days). After the deadline, anyone can call `trigger_auto_release_*` to
-/// force-resolve in the worker's favor.
-///
-/// # Arguments
-/// * `reason` - UTF-8 reason (max 256 bytes)
-/// * `dispute_deadline` - unix ts (must be > now and ≤ now + 90 days)
-pub fn handler(
-    ctx: Context<RaiseDispute>,
-    reason: Vec<u8>,
-    dispute_deadline: i64,
-) -> Result<()> {
+/// In `Funded`: either party may dispute. In `PendingRelease`: only the
+/// employer, since the worker is already committed by the prior confirm.
+/// `dispute_deadline` is mandatory and bounded by `MAX_DISPUTE_DEADLINE_DURATION`
+/// (90 days); past it, anyone may `trigger_auto_release_*` in the worker's favor.
+pub fn handler(ctx: Context<RaiseDispute>, reason: Vec<u8>, dispute_deadline: i64) -> Result<()> {
     let escrow = &mut ctx.accounts.escrow;
     let signer_key = ctx.accounts.signer.key();
     let clock = Clock::get()?;
@@ -48,10 +33,8 @@ pub fn handler(
         EscrowError::Unauthorized
     );
 
-    // In PendingRelease, only the employer can dispute. The worker has
-    // already either explicitly confirmed (committed) or seen the employer
-    // confirm (no reason for them to dispute — they could just wait for
-    // release / auto-release).
+    // In PendingRelease the worker is already committed by the prior confirm,
+    // so only the employer may dispute.
     if escrow.status == EscrowStatus::PendingRelease {
         require!(
             signer_key == escrow.employer,
@@ -65,13 +48,14 @@ pub fn handler(
     );
 
     // Mandatory, future, bounded deadline.
-    require!(
-        dispute_deadline > 0,
-        EscrowError::DisputeDeadlineRequired
-    );
+    require!(dispute_deadline > 0, EscrowError::DisputeDeadlineRequired);
     require!(
         dispute_deadline > clock.unix_timestamp,
         EscrowError::InvalidDisputeDeadline
+    );
+    require!(
+        dispute_deadline - clock.unix_timestamp >= Escrow::MIN_DISPUTE_DEADLINE_DURATION,
+        EscrowError::DisputeWindowTooShort
     );
     require!(
         dispute_deadline - clock.unix_timestamp <= Escrow::MAX_DISPUTE_DEADLINE_DURATION,
@@ -94,7 +78,11 @@ pub fn handler(
         dispute_deadline,
     });
 
-    msg!("Dispute raised by {:?} deadline={}", signer_key, dispute_deadline);
+    msg!(
+        "Dispute raised by {:?} deadline={}",
+        signer_key,
+        dispute_deadline
+    );
 
     Ok(())
 }

@@ -7,7 +7,6 @@ use anchor_lang::system_program::{transfer, Transfer};
 /// Accounts required for releasing SOL from escrow
 #[derive(Accounts)]
 pub struct ReleaseSol<'info> {
-    /// The escrow account
     #[account(
         mut,
         constraint = escrow.status == EscrowStatus::PendingRelease || escrow.status == EscrowStatus::Funded @ EscrowError::InvalidStatus,
@@ -15,7 +14,6 @@ pub struct ReleaseSol<'info> {
     )]
     pub escrow: Account<'info, Escrow>,
 
-    /// The vault PDA holding the SOL
     #[account(
         mut,
         seeds = [Escrow::VAULT_SEED, escrow.key().as_ref()],
@@ -24,7 +22,6 @@ pub struct ReleaseSol<'info> {
     /// CHECK: This is a PDA that holds SOL
     pub escrow_vault: UncheckedAccount<'info>,
 
-    /// The employee receiving the worker payment
     #[account(
         mut,
         constraint = employee.key() == escrow.employee @ EscrowError::Unauthorized,
@@ -32,38 +29,25 @@ pub struct ReleaseSol<'info> {
     /// CHECK: Verified against escrow.employee
     pub employee: UncheckedAccount<'info>,
 
-    /// The platform authority receiving the commission
     #[account(
         mut,
-        constraint = platform_authority.key() == escrow.platform_authority @ EscrowError::Unauthorized,
+        constraint = fee_recipient.key() == escrow.fee_recipient @ EscrowError::InvalidFeeRecipient,
     )]
-    /// CHECK: Verified against escrow.platform_authority
-    pub platform_authority: UncheckedAccount<'info>,
+    /// CHECK: Verified against escrow.fee_recipient
+    pub fee_recipient: UncheckedAccount<'info>,
 
-    /// The authority (employer or platform authority)
+    /// Employer, platform authority, or worker (see handler for the rules).
     pub authority: Signer<'info>,
 
-    /// System program
     pub system_program: Program<'info, System>,
 }
 
-/// Releases the remaining SOL in escrow:
-///   - the unreleased worker amount goes to the employee
-///   - the rest of the vault (commission + any dust) goes to platform
-///
-/// Authorization (any one of):
-///   - employer + `employer_confirmed`
-///   - platform_authority
-///   - employee, when both `employer_confirmed` and `employee_confirmed`
-///     are true (worker self-release after mutual agreement)
-///
-/// The worker self-release path covers the "employer confirmed then ghosted"
-/// case so the worker doesn't need to wait for a dispute.
-///
-/// The vault is drained to its actual balance, not the recorded amounts —
-/// this defends against dust deposits that would otherwise leave the vault
-/// below rent-exempt minimum and brick the release.
-pub fn handler(ctx: Context<ReleaseSol>) -> Result<()> {
+/// Releases escrowed SOL: the worker amount to the employee and the remaining
+/// balance (commission plus any dust) to the treasury. The worker self-release
+/// path (both parties confirmed) covers the "employer confirmed then ghosted"
+/// case without a dispute. The vault is drained to its actual balance, not the
+/// recorded amounts, so dust deposits cannot strand it below rent-exempt minimum.
+pub fn handler(ctx: Context<ReleaseSol>, ref_id: [u8; 32]) -> Result<()> {
     let escrow = &mut ctx.accounts.escrow;
     let authority_key = ctx.accounts.authority.key();
 
@@ -71,9 +55,8 @@ pub fn handler(ctx: Context<ReleaseSol>) -> Result<()> {
     // worker after both parties confirmed.
     let is_employer_authorized = authority_key == escrow.employer && escrow.employer_confirmed;
     let is_platform_authorized = authority_key == escrow.platform_authority;
-    let is_worker_authorized = authority_key == escrow.employee
-        && escrow.employer_confirmed
-        && escrow.employee_confirmed;
+    let is_worker_authorized =
+        authority_key == escrow.employee && escrow.employer_confirmed && escrow.employee_confirmed;
 
     require!(
         is_employer_authorized || is_platform_authorized || is_worker_authorized,
@@ -85,7 +68,6 @@ pub fn handler(ctx: Context<ReleaseSol>) -> Result<()> {
     let worker_amount = escrow.remaining_worker_amount();
     require!(worker_amount > 0, EscrowError::InsufficientFunds);
 
-    // PDA signing for the vault
     let escrow_key = escrow.key();
     let vault_seeds = &[
         Escrow::VAULT_SEED,
@@ -94,7 +76,6 @@ pub fn handler(ctx: Context<ReleaseSol>) -> Result<()> {
     ];
     let signer_seeds = &[&vault_seeds[..]];
 
-    // Pay the worker first.
     transfer(
         CpiContext::new_with_signer(
             ctx.accounts.system_program.to_account_info(),
@@ -107,7 +88,7 @@ pub fn handler(ctx: Context<ReleaseSol>) -> Result<()> {
         worker_amount,
     )?;
 
-    // Drain the rest (commission + any dust deposit) to the platform.
+    // Drain the rest (commission + any dust deposit) to the treasury.
     // This guarantees the vault ends at exactly 0, which Solana requires
     // for any sub-rent-exempt remainder.
     let commission_amount = ctx.accounts.escrow_vault.lamports();
@@ -117,7 +98,7 @@ pub fn handler(ctx: Context<ReleaseSol>) -> Result<()> {
                 ctx.accounts.system_program.to_account_info(),
                 Transfer {
                     from: ctx.accounts.escrow_vault.to_account_info(),
-                    to: ctx.accounts.platform_authority.to_account_info(),
+                    to: ctx.accounts.fee_recipient.to_account_info(),
                 },
                 signer_seeds,
             ),
@@ -135,16 +116,17 @@ pub fn handler(ctx: Context<ReleaseSol>) -> Result<()> {
         recipient: escrow.employee,
         amount: worker_amount,
         commission_amount,
-        commission_recipient: escrow.platform_authority,
+        commission_recipient: escrow.fee_recipient,
         is_native: true,
         token_mint: escrow.token_mint,
         initiator: authority_key,
         is_partial: false,
         remaining_worker_amount: 0,
+        ref_id,
     });
 
     msg!(
-        "Released {} lamports to employee, {} lamports to platform",
+        "Released {} lamports to employee, {} lamports to treasury",
         worker_amount,
         commission_amount
     );

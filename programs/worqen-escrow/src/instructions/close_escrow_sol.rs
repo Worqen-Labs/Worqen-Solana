@@ -3,19 +3,10 @@ use crate::state::Escrow;
 use anchor_lang::prelude::*;
 use anchor_lang::system_program::{transfer, Transfer};
 
-/// Close a terminal SOL escrow and refund storage rent to the employer.
+/// Close a terminal SOL escrow, sweeping any vault dust and refunding rent to the employer.
 ///
-/// **Allowed status:** `Released` / `Resolved` / `Cancelled`.
-///
-/// This:
-/// 1. Sweeps any leftover lamports from the SOL vault PDA back to the
-///    employer (covers dust deposits sent post-release).
-/// 2. Closes the escrow account, refunding its ~0.005 SOL of rent to the
-///    employer via Anchor's `close = employer` directive.
-///
-/// Either employer or platform_authority may sign — the platform can run
-/// a cleanup worker that calls this on terminal escrows so rent comes back
-/// without requiring employer action.
+/// Either employer or platform_authority may sign, so a cleanup worker can
+/// reclaim rent on terminal escrows without requiring employer action.
 #[derive(Accounts)]
 pub struct CloseEscrowSol<'info> {
     #[account(
@@ -53,7 +44,6 @@ pub struct CloseEscrowSol<'info> {
 }
 
 pub fn handler(ctx: Context<CloseEscrowSol>) -> Result<()> {
-    // Sweep any vault dust back to the employer before close.
     let vault_balance = ctx.accounts.escrow_vault.lamports();
     if vault_balance > 0 {
         let escrow_key = ctx.accounts.escrow.key();
