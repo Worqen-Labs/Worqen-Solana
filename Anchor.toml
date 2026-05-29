@@ -1,14 +1,15 @@
 [toolchain]
+package_manager = "bun"
 
 [features]
 resolution = true
 skip-lint = false
 
 [programs.devnet]
-worqen_escrow = "GDCBqN8AVU5i2xXdeTNwBmCCsd9Y8rfiH1JDKA8UjDYh"
+worqen_escrow = "6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ"
 
 [programs.localnet]
-worqen_escrow = "GDCBqN8AVU5i2xXdeTNwBmCCsd9Y8rfiH1JDKA8UjDYh"
+worqen_escrow = "6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ"
 
 [registry]
 url = "https://api.apr.dev"
@@ -18,4 +19,4 @@ cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
-test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
+test = "bun test"

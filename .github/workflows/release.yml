@@ -1,0 +1,119 @@
+name: Release
+
+# Triggered by a semver tag (e.g. v1.0.0). Produces a REPRODUCIBLE (verifiable)
+# build, publishes the .so + IDL + hashes as a GitHub Release, and — gated
+# behind a protected `mainnet-beta` environment (configure required reviewers)
+# — writes an on-chain buffer of the verified bytecode for the Squads multisig
+# to execute the upgrade with. Nothing is auto-deployed to mainnet.
+#
+# Optional secrets (GitHub > Settings > Environments > mainnet-beta):
+#   MAINNET_DEPLOYER_KEYPAIR  - a funded fee-payer keypair used ONLY to write
+#                               the buffer (NOT the upgrade authority).
+#   MAINNET_PROGRAM_ID        - the mainnet program id.
+#   MAINNET_UPGRADE_MULTISIG  - the Squads multisig that the buffer authority is
+#                               transferred to (it executes the final upgrade).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+env:
+  SOLANA_VERSION: "4.0.0"
+  ANCHOR_VERSION: "0.32.1"
+
+jobs:
+  verifiable-build:
+    name: Reproducible build + GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Solana CLI (Agave)
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install Anchor (avm)
+        run: |
+          cargo install --git https://github.com/coral-xyz/anchor avm --force --locked
+          avm install ${ANCHOR_VERSION}
+          avm use ${ANCHOR_VERSION}
+
+      - name: Install solana-verify
+        run: cargo install solana-verify --locked
+
+      - name: Reproducible build (Docker)
+        run: solana-verify build --library-name worqen_escrow
+
+      - uses: oven-sh/setup-bun@v2
+      - name: IDL (for distribution)
+        run: bun install --frozen-lockfile && anchor build
+
+      - name: Hashes + checksums
+        run: |
+          mkdir -p dist
+          cp target/deploy/worqen_escrow.so dist/
+          cp target/idl/worqen_escrow.json dist/
+          solana-verify get-executable-hash target/deploy/worqen_escrow.so | tee dist/program-hash.txt
+          (cd dist && sha256sum worqen_escrow.so worqen_escrow.json > SHA256SUMS.txt)
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/worqen_escrow.so
+            dist/worqen_escrow.json
+            dist/program-hash.txt
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
+          body: |
+            Reproducible build of Worqen Escrow ${{ github.ref_name }}.
+            Verify with: `solana-verify verify-from-repo --remote -um --program-id <ID> ${{ github.server_url }}/${{ github.repository }}`
+            Program hash: see `program-hash.txt`.
+
+  mainnet-buffer:
+    name: Write verified buffer for the multisig (manual approval)
+    needs: verifiable-build
+    runs-on: ubuntu-latest
+    environment: mainnet-beta
+    if: ${{ github.event_name == 'push' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Solana CLI (Agave)
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install solana-verify
+        run: cargo install solana-verify --locked
+
+      - name: Reproducible build (Docker)
+        run: solana-verify build --library-name worqen_escrow
+
+      - name: Load buffer fee-payer
+        run: |
+          install -m 600 /dev/null /tmp/payer.json
+          printf '%s' "${{ secrets.MAINNET_DEPLOYER_KEYPAIR }}" > /tmp/payer.json
+          solana config set --url https://api.mainnet-beta.solana.com --keypair /tmp/payer.json
+
+      - name: Write buffer + hand authority to the multisig
+        run: |
+          set -euo pipefail
+          BUFFER=$(solana program write-buffer target/deploy/worqen_escrow.so --output json | python3 -c "import sys,json;print(json.load(sys.stdin)['buffer'])")
+          echo "Buffer: $BUFFER"
+          solana program set-buffer-authority "$BUFFER" --new-buffer-authority "${{ secrets.MAINNET_UPGRADE_MULTISIG }}"
+          echo "## Mainnet upgrade buffer ready" >> "$GITHUB_STEP_SUMMARY"
+          echo "Execute the upgrade from Squads:" >> "$GITHUB_STEP_SUMMARY"
+          echo "- program id: \`${{ secrets.MAINNET_PROGRAM_ID }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- buffer: \`$BUFFER\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- buffer authority: \`${{ secrets.MAINNET_UPGRADE_MULTISIG }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Scrub payer key
+        if: always()
+        run: shred -u /tmp/payer.json || rm -f /tmp/payer.json

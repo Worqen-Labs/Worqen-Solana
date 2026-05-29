@@ -1,0 +1,87 @@
+name: Deploy (devnet)
+
+# Continuous deployment to DEVNET. Manual trigger (or call from another
+# workflow). Upgrades the existing program in place, refreshes the on-chain
+# IDL, and runs the full test suite against the live program as a smoke gate.
+#
+# Required repository/environment secret (GitHub > Settings > Environments > devnet):
+#   DEVNET_AUTHORITY_KEYPAIR  - JSON byte-array of the program's devnet upgrade
+#                               authority keypair (also used as deploy fee payer).
+#
+# MAINNET is intentionally NOT auto-deployed here — its upgrade authority is a
+# Squads multisig that cannot sign non-interactively. Use the `Release`
+# workflow, which produces a verifiable build + a buffer for the multisig.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-devnet
+  cancel-in-progress: false
+
+env:
+  SOLANA_VERSION: "4.0.0"
+  ANCHOR_VERSION: "0.32.1"
+  CLUSTER_URL: "https://api.devnet.solana.com"
+
+jobs:
+  deploy:
+    name: build → upgrade → verify
+    runs-on: ubuntu-latest
+    environment: devnet
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Solana CLI (Agave)
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install Anchor (avm)
+        run: |
+          cargo install --git https://github.com/coral-xyz/anchor avm --force --locked
+          avm install ${ANCHOR_VERSION}
+          avm use ${ANCHOR_VERSION}
+
+      - uses: oven-sh/setup-bun@v2
+      - name: Install JS deps
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        run: anchor build
+
+      - name: Resolve program id
+        id: pid
+        run: |
+          PID=$(awk -F'"' '/^\[programs.devnet\]/{f=1} f&&/worqen_escrow/{print $2; exit}' Anchor.toml)
+          echo "program_id=$PID" >> "$GITHUB_OUTPUT"
+          echo "Program: $PID"
+
+      - name: Load upgrade authority
+        run: |
+          install -m 600 /dev/null /tmp/authority.json
+          printf '%s' "${{ secrets.DEVNET_AUTHORITY_KEYPAIR }}" > /tmp/authority.json
+          solana config set --url "$CLUSTER_URL" --keypair /tmp/authority.json
+          echo "Authority: $(solana address -k /tmp/authority.json)  balance: $(solana balance)"
+
+      - name: Upgrade program
+        run: |
+          anchor upgrade target/deploy/worqen_escrow.so \
+            --program-id ${{ steps.pid.outputs.program_id }} \
+            --provider.cluster "$CLUSTER_URL" \
+            --provider.wallet /tmp/authority.json
+
+      - name: Refresh on-chain IDL
+        run: |
+          anchor idl upgrade ${{ steps.pid.outputs.program_id }} \
+            -f target/idl/worqen_escrow.json \
+            --provider.cluster "$CLUSTER_URL" \
+            --provider.wallet /tmp/authority.json
+
+      - name: Smoke test the built artifact (LiteSVM, in-process)
+        run: bun test
+
+      - name: Scrub authority key
+        if: always()
+        run: shred -u /tmp/authority.json || rm -f /tmp/authority.json

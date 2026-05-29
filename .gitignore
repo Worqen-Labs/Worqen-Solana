@@ -31,3 +31,10 @@ Thumbs.db
 # TypeScript
 dist/
 *.tsbuildinfo
+
+# Release artifacts
+dist/
+
+# Keys / secrets (never commit a keypair)
+*-keypair.json
+*.pem
