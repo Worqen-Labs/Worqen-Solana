@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "Worqen Escrow — trustless on-chain payment escrow for the Worqen job marketplace (Solana / Anchor 0.32)"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/worqen-labs/worqen-escrow"
+repository = "https://github.com/Worqen-Labs/Worqen-Escrow"
 homepage = "https://worqen.com"
 readme = "../../README.md"
 

@@ -5,7 +5,7 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "https://github.com/worqen-labs/worqen-escrow.git"
+    "url": "https://github.com/Worqen-Labs/Worqen-Escrow.git"
   },
   "license": "Apache-2.0",
   "scripts": {

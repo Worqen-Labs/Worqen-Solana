@@ -15,9 +15,9 @@ security_txt! {
     name: "Worqen Escrow",
     project_url: "https://worqen.com",
     contacts: "email:security@worqen.com",
-    policy: "https://github.com/worqen-labs/worqen-escrow/blob/main/SECURITY.md",
+    policy: "https://github.com/Worqen-Labs/Worqen-Escrow/blob/main/SECURITY.md",
     preferred_languages: "en",
-    source_code: "https://github.com/worqen-labs/worqen-escrow",
+    source_code: "https://github.com/Worqen-Labs/Worqen-Escrow",
     source_release: "v1.0.0",
     auditors: "Pending external audit"
 }
