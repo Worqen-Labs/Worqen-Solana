@@ -30,12 +30,15 @@
       "config"
     ],
     "authority": "14AZtBTAyX9E9GsYryS5BEUT62mDeSDiwHkoKs9rEaSk",
-    "fee_recipient": "9Jy7BwYbxjWzLx9QBRtxguk4ttRo5WhKRqio3NVnjbzV",
-    "fee_recipient_note": "EPHEMERAL test treasury from the smoke test (private key not retained). Run `update_config` to point at a real treasury before further devnet use. On MAINNET set a dedicated cold/receive-only wallet.",
+    "fee_recipient": "49gGSC3hGZ2KFX4rFou9PJqjMchKQGNBpFQzpYhaNan1",
+    "fee_recipient_note": "Dedicated devnet treasury (keypair at ~/.config/solana/worqen-treasury.json, recoverable). Set via update_config. On MAINNET use a dedicated cold/receive-only or multisig wallet.",
     "default_commission_bps": 500,
     "paused": false,
-    "allowed_mints": [],
-    "allowed_mints_note": "Empty = SOL-only so far. Run `add_allowed_mint` for the devnet USDC/USDT/EURC mints to enable token escrows."
+    "allowed_mints": [
+      "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+      "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr"
+    ],
+    "allowed_mints_note": "USDC (4zMMC9...) and EURC (HzwqbKZw8...) devnet mints, set via scripts/bootstrap-config.ts. SOL is always allowed. USDT has no devnet mint (alias to USDC on devnet)."
   },
   "idl": {
     "source_of_truth": "target/idl/worqen_escrow.json",

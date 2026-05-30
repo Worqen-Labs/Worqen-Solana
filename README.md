@@ -20,7 +20,7 @@ Trustless payment escrow and direct‑pay settlement for the [Worqen](https://wo
 | **ProgramData account** | `8nty8pKT9Pjnubi2kyXPte7SpiEpRG4FYQpn6AwYuNgQ` |
 | **Upgrade authority** | `14AZtBTAyX9E9GsYryS5BEUT62mDeSDiwHkoKs9rEaSk` (devnet single key; mainnet must be a multisig) |
 | **Config PDA** | `FoZkFXVjLSgeLDcZ98cahFSMUVTt7NfBDprKvpvtTTvN` (seed `"config"`) |
-| **Treasury (`fee_recipient`)** | `9Jy7BwYbxjWzLx9QBRtxguk4ttRo5WhKRqio3NVnjbzV` (ephemeral test treasury — replace before production use) |
+| **Treasury (`fee_recipient`)** | `49gGSC3hGZ2KFX4rFou9PJqjMchKQGNBpFQzpYhaNan1` (dedicated devnet treasury; mainnet must be a cold/multisig wallet) |
 | **Explorer** | <https://explorer.solana.com/address/6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ?cluster=devnet> |
 | **Solscan** | <https://solscan.io/account/6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ?cluster=devnet> |
 
