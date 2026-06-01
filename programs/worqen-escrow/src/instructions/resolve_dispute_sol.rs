@@ -23,7 +23,8 @@ pub struct ResolveDisputeSol<'info> {
     /// CHECK: This is a PDA that holds SOL
     pub escrow_vault: UncheckedAccount<'info>,
 
-    /// Receives the employer share plus the proportional commission refund.
+    /// Receives the employer share of the worker amount (plus any dust). The
+    /// commission is NOT refunded here — it goes to the treasury.
     #[account(
         mut,
         constraint = employer.key() == escrow.employer @ EscrowError::Unauthorized,
@@ -38,18 +39,29 @@ pub struct ResolveDisputeSol<'info> {
     /// CHECK: Verified against escrow.employee
     pub employee: UncheckedAccount<'info>,
 
+    /// Platform treasury — receives the commission. The platform keeps its fee
+    /// on dispute resolution; it is no longer refunded to the employer.
+    #[account(
+        mut,
+        constraint = fee_recipient.key() == escrow.fee_recipient @ EscrowError::InvalidFeeRecipient,
+    )]
+    /// CHECK: Verified against escrow.fee_recipient
+    pub fee_recipient: UncheckedAccount<'info>,
+
     pub platform_authority: Signer<'info>,
 
     pub system_program: Program<'info, System>,
 }
 
-/// Platform splits the remaining worker payment between parties; commission is
-/// refunded to the employer (platform forfeits commission on dispute).
+/// Platform splits the remaining worker payment between the parties and KEEPS
+/// the commission: the full remaining commission is routed to the treasury
+/// (`fee_recipient`) and is never refunded to the employer.
 ///
 /// The vault is drained to its actual balance rather than recorded amounts, so
 /// any dust deposit is swept to the employer — avoiding a rent-exempt-min DoS
 /// that would otherwise brick resolve. `employee_share` is the lamports paid to
-/// the employee; the remainder (plus dust and commission) goes to the employer.
+/// the employee; the commission goes to the treasury and the remainder (the
+/// employer's share of the worker amount plus any dust) goes to the employer.
 pub fn handler(ctx: Context<ResolveDisputeSol>, employee_share: u64) -> Result<()> {
     let escrow = &mut ctx.accounts.escrow;
     let clock = Clock::get()?;
@@ -86,8 +98,26 @@ pub fn handler(ctx: Context<ResolveDisputeSol>, employee_share: u64) -> Result<(
         )?;
     }
 
-    // Drain everything else (employer share + commission refund + any dust)
-    // to the employer. Vault ends at exactly 0.
+    // Platform keeps its commission on a dispute: route the full remaining
+    // commission to the treasury before refunding the employer. Capped at the
+    // live vault balance for safety.
+    let commission_to_treasury = remaining_commission.min(ctx.accounts.escrow_vault.lamports());
+    if commission_to_treasury > 0 {
+        transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.escrow_vault.to_account_info(),
+                    to: ctx.accounts.fee_recipient.to_account_info(),
+                },
+                signer_seeds,
+            ),
+            commission_to_treasury,
+        )?;
+    }
+
+    // Drain everything else (employer share + any dust) to the employer.
+    // Vault ends at exactly 0.
     let total_to_employer = ctx.accounts.escrow_vault.lamports();
     if total_to_employer > 0 {
         transfer(
@@ -116,17 +146,18 @@ pub fn handler(ctx: Context<ResolveDisputeSol>, employee_share: u64) -> Result<(
         resolver: ctx.accounts.platform_authority.key(),
         employee_share,
         employer_share,
-        commission_refunded: remaining_commission,
+        // Platform now keeps its commission on disputes; nothing is refunded.
+        commission_refunded: 0,
         is_native: true,
         token_mint: escrow.token_mint,
         forced: false,
     });
 
     msg!(
-        "Dispute resolved: {} to employee, {} to employer (incl {} commission refund)",
+        "Dispute resolved: {} to employee, {} to employer, {} commission to treasury",
         employee_share,
         total_to_employer,
-        remaining_commission
+        commission_to_treasury
     );
 
     Ok(())

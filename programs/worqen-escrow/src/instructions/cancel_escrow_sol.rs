@@ -29,13 +29,25 @@ pub struct CancelEscrowSol<'info> {
     /// CHECK: Verified against escrow.employer
     pub employer: UncheckedAccount<'info>,
 
+    /// Platform treasury — receives the commission. The platform keeps its fee
+    /// even on cancellation of a funded escrow; only the worker deposit is
+    /// refunded to the employer. On `Created` the vault is empty, so nothing is
+    /// collected.
+    #[account(
+        mut,
+        constraint = fee_recipient.key() == escrow.fee_recipient @ EscrowError::InvalidFeeRecipient,
+    )]
+    /// CHECK: Verified against escrow.fee_recipient
+    pub fee_recipient: UncheckedAccount<'info>,
+
     /// The signer (employer or platform authority)
     pub signer: Signer<'info>,
 
     pub system_program: Program<'info, System>,
 }
 
-/// Cancels a SOL escrow and refunds the employer the full vault balance.
+/// Cancels a SOL escrow. The employer is refunded the worker deposit; the
+/// platform keeps its commission (routed to the treasury) even on cancellation.
 ///
 /// Authorization: in `Created` state, employer or platform_authority; in
 /// `Funded` state, platform_authority only (the employer must dispute rather
@@ -63,7 +75,7 @@ pub fn handler(ctx: Context<CancelEscrowSol>, reason: Vec<u8>) -> Result<()> {
     );
 
     let clock = Clock::get()?;
-    let vault_balance = ctx.accounts.escrow_vault.lamports();
+    let remaining_commission = escrow.remaining_commission();
 
     let escrow_key = escrow.key();
     let vault_seeds = &[
@@ -73,7 +85,28 @@ pub fn handler(ctx: Context<CancelEscrowSol>, reason: Vec<u8>) -> Result<()> {
     ];
     let signer_seeds = &[&vault_seeds[..]];
 
-    if vault_balance > 0 {
+    // Platform keeps its commission on cancellation: route the remaining
+    // commission to the treasury first. Capped at the live vault balance so a
+    // `Created` (unfunded) escrow with an empty vault collects nothing.
+    let commission_to_treasury = remaining_commission.min(ctx.accounts.escrow_vault.lamports());
+    if commission_to_treasury > 0 {
+        transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.escrow_vault.to_account_info(),
+                    to: ctx.accounts.fee_recipient.to_account_info(),
+                },
+                signer_seeds,
+            ),
+            commission_to_treasury,
+        )?;
+    }
+
+    // Refund the rest of the vault (worker deposit + any dust) to the employer.
+    // Drained to actual balance so the vault ends at exactly 0.
+    let refund_amount = ctx.accounts.escrow_vault.lamports();
+    if refund_amount > 0 {
         transfer(
             CpiContext::new_with_signer(
                 ctx.accounts.system_program.to_account_info(),
@@ -83,7 +116,7 @@ pub fn handler(ctx: Context<CancelEscrowSol>, reason: Vec<u8>) -> Result<()> {
                 },
                 signer_seeds,
             ),
-            vault_balance,
+            refund_amount,
         )?;
     }
 
@@ -99,16 +132,18 @@ pub fn handler(ctx: Context<CancelEscrowSol>, reason: Vec<u8>) -> Result<()> {
         escrow_id: escrow.escrow_id,
         cancelled_by: signer_key,
         refunded_to: escrow.employer,
-        amount_refunded: escrow.remaining_worker_amount(),
-        commission_refunded: escrow.remaining_commission(),
+        amount_refunded: refund_amount,
+        // Platform keeps its commission on cancellation; nothing is refunded.
+        commission_refunded: 0,
         is_native: true,
         token_mint: escrow.token_mint,
     });
 
     msg!(
-        "Escrow cancelled by {:?}, {} lamports refunded to employer",
+        "Escrow cancelled by {:?}: {} lamports to employer, {} commission to treasury",
         signer_key,
-        vault_balance
+        refund_amount,
+        commission_to_treasury
     );
 
     Ok(())

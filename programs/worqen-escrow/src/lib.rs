@@ -18,7 +18,7 @@ security_txt! {
     policy: "https://github.com/Worqen-Labs/Worqen-Escrow/blob/main/SECURITY.md",
     preferred_languages: "en",
     source_code: "https://github.com/Worqen-Labs/Worqen-Escrow",
-    source_release: "v1.0.0",
+    source_release: "v1.1.0",
     auditors: "Pending external audit"
 }
 

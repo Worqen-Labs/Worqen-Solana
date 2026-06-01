@@ -27,7 +27,7 @@ pub struct MutualCancelSol<'info> {
     pub escrow_vault: UncheckedAccount<'info>,
 
     /// The employer — signs to authorize the split and receives their share
-    /// (plus the commission refund and any dust drained from the vault).
+    /// (plus any dust). The commission is NOT refunded here.
     #[account(mut)]
     pub employer: Signer<'info>,
 
@@ -35,22 +35,33 @@ pub struct MutualCancelSol<'info> {
     #[account(mut)]
     pub employee: Signer<'info>,
 
+    /// Platform treasury — receives the commission. The platform keeps its fee
+    /// on a mutual cancellation; it is no longer refunded to the employer.
+    #[account(
+        mut,
+        constraint = fee_recipient.key() == escrow.fee_recipient @ EscrowError::InvalidFeeRecipient,
+    )]
+    /// CHECK: Verified against escrow.fee_recipient
+    pub fee_recipient: UncheckedAccount<'info>,
+
     /// System program
     pub system_program: Program<'info, System>,
 }
 
 /// Employer + employee mutually cancel a funded escrow, splitting the remaining
-/// worker payment between themselves; commission is refunded to the employer.
+/// worker payment between themselves; the platform keeps its commission (routed
+/// to the treasury).
 ///
 /// The vault is drained to its actual balance (not the recorded amounts), so the
-/// commission refund and any dust sweep to the employer — avoiding a rent-exempt-min
-/// DoS and leaving the vault at exactly 0. `employee_share` is the lamports sent to
-/// the employee; `employer_share = remaining_worker - employee_share`.
+/// employer's share and any dust sweep to the employer — avoiding a
+/// rent-exempt-min DoS and leaving the vault at exactly 0. `employee_share` is
+/// the lamports sent to the employee; `employer_share = remaining_worker - employee_share`.
 pub fn handler(ctx: Context<MutualCancelSol>, employee_share: u64) -> Result<()> {
     let escrow = &mut ctx.accounts.escrow;
     let clock = Clock::get()?;
 
     let remaining_worker = escrow.remaining_worker_amount();
+    let remaining_commission = escrow.remaining_commission();
 
     require!(
         employee_share <= remaining_worker,
@@ -82,8 +93,25 @@ pub fn handler(ctx: Context<MutualCancelSol>, employee_share: u64) -> Result<()>
         )?;
     }
 
-    // Drain everything else (employer share + commission refund + any dust)
-    // to the employer. Vault ends at exactly 0.
+    // Platform keeps its commission: route the remaining commission to the
+    // treasury before refunding the employer.
+    let commission_to_treasury = remaining_commission.min(ctx.accounts.escrow_vault.lamports());
+    if commission_to_treasury > 0 {
+        transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.escrow_vault.to_account_info(),
+                    to: ctx.accounts.fee_recipient.to_account_info(),
+                },
+                signer_seeds,
+            ),
+            commission_to_treasury,
+        )?;
+    }
+
+    // Drain everything else (employer share + any dust) to the employer.
+    // Vault ends at exactly 0.
     let total_to_employer = ctx.accounts.escrow_vault.lamports();
     if total_to_employer > 0 {
         transfer(
@@ -117,9 +145,10 @@ pub fn handler(ctx: Context<MutualCancelSol>, employee_share: u64) -> Result<()>
     });
 
     msg!(
-        "Escrow settled: {} to employee, {} to employer (incl commission refund)",
+        "Escrow settled: {} to employee, {} to employer, {} commission to treasury",
         employee_share,
-        total_to_employer
+        total_to_employer,
+        commission_to_treasury
     );
 
     Ok(())

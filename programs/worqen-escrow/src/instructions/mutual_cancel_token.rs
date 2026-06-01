@@ -57,6 +57,19 @@ pub struct MutualCancelToken<'info> {
     )]
     pub employee_token_account: Box<Account<'info, TokenAccount>>,
 
+    /// CHECK: Verified against escrow.fee_recipient
+    #[account(constraint = fee_recipient.key() == escrow.fee_recipient @ EscrowError::InvalidFeeRecipient)]
+    pub fee_recipient: UncheckedAccount<'info>,
+
+    /// Treasury token account — receives the commission. Constrained on owner +
+    /// mint. The platform keeps its fee on a mutual cancellation.
+    #[account(
+        mut,
+        constraint = platform_token_account.owner == escrow.fee_recipient @ EscrowError::Unauthorized,
+        constraint = platform_token_account.mint == escrow.token_mint @ EscrowError::InvalidTokenMint,
+    )]
+    pub platform_token_account: Box<Account<'info, TokenAccount>>,
+
     pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
@@ -64,13 +77,15 @@ pub struct MutualCancelToken<'info> {
 
 /// Employer + employee amicably settle a funded token escrow without a
 /// dispute. `employee_share` (<= remaining worker amount) goes to the
-/// employee; the rest — employer's portion plus the proportional
-/// commission refund plus any dust — drains back to the employer.
+/// employee; the platform keeps its commission (routed to the treasury); the
+/// remainder — the employer's portion plus any dust — drains back to the
+/// employer.
 pub fn handler(ctx: Context<MutualCancelToken>, employee_share: u64) -> Result<()> {
     let escrow = &mut ctx.accounts.escrow;
     let clock = Clock::get()?;
 
     let remaining_worker = escrow.remaining_worker_amount();
+    let remaining_commission = escrow.remaining_commission();
 
     require!(
         employee_share <= remaining_worker,
@@ -99,8 +114,26 @@ pub fn handler(ctx: Context<MutualCancelToken>, employee_share: u64) -> Result<(
         )?;
     }
 
-    // Drain remaining vault (employer_share + commission_refund + dust)
-    // back to the employer's token account.
+    // Platform keeps its commission: route remaining commission to the treasury
+    // token account before refunding the employer.
+    ctx.accounts.vault_token_account.reload()?;
+    let commission_to_treasury = remaining_commission.min(ctx.accounts.vault_token_account.amount);
+    if commission_to_treasury > 0 {
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.vault_token_account.to_account_info(),
+                    to: ctx.accounts.platform_token_account.to_account_info(),
+                    authority: escrow.to_account_info(),
+                },
+                signer_seeds,
+            ),
+            commission_to_treasury,
+        )?;
+    }
+
+    // Drain remaining vault (employer_share + dust) back to the employer.
     ctx.accounts.vault_token_account.reload()?;
     let total_to_employer = ctx.accounts.vault_token_account.amount;
     if total_to_employer > 0 {
@@ -136,9 +169,10 @@ pub fn handler(ctx: Context<MutualCancelToken>, employee_share: u64) -> Result<(
     });
 
     msg!(
-        "Mutual settle: {} tokens to employee, {} tokens to employer",
+        "Mutual settle: {} tokens to employee, {} tokens to employer, {} commission to treasury",
         employee_share,
-        total_to_employer
+        total_to_employer,
+        commission_to_treasury
     );
 
     Ok(())

@@ -748,6 +748,7 @@ describe("SOL escrow", () => {
         escrowVault: ctx.vault,
         employer: payer.publicKey,
         employee: ctx.employee.publicKey,
+        feeRecipient: treasury.publicKey,
         systemProgram: SystemProgram.programId,
       })
       .instruction();
@@ -768,6 +769,7 @@ describe("SOL escrow", () => {
         escrow: ctx.escrow,
         escrowVault: ctx.vault,
         employer: payer.publicKey,
+        feeRecipient: treasury.publicKey,
         signer: payer.publicKey,
         systemProgram: SystemProgram.programId,
       })
@@ -1000,6 +1002,8 @@ describe("token escrow", () => {
         employerTokenAccount: payerAta,
         employee: ctx.employee.publicKey,
         employeeTokenAccount: employeeAta,
+        feeRecipient: treasury.publicKey,
+        platformTokenAccount: treasuryAta,
         tokenProgram: TOKEN_PROGRAM_ID,
         associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
@@ -1012,13 +1016,13 @@ describe("token escrow", () => {
     expect(decodeEscrow(ctx.escrow).status.resolved).toBeDefined();
   });
 
-  test("cancel_escrow_token: platform cancels a funded token escrow, full refund", async () => {
+  test("cancel_escrow_token: platform cancels a funded token escrow; platform keeps the fee", async () => {
     const ctx = newTokenEscrow();
     await createTokenEscrow(ctx);
     await depositToken(ctx);
 
-    const funded = TOK_AMT.add(commission(TOK_AMT));
     const empBefore = tokenBalance(payerAta);
+    const treBefore = tokenBalance(treasuryAta);
     // In Funded only platform_authority may cancel; payer is feePayer, platformAuthority co-signs.
     const ix = await program.methods
       .cancelEscrowToken(Buffer.from("platform refund"))
@@ -1027,13 +1031,20 @@ describe("token escrow", () => {
         vaultTokenAccount: ctx.vaultAta,
         employer: payer.publicKey,
         employerTokenAccount: payerAta,
+        feeRecipient: treasury.publicKey,
+        platformTokenAccount: treasuryAta,
         signer: ctx.platformAuthority.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
       })
       .instruction();
     send([ix], [ctx.platformAuthority]);
 
-    expect(tokenBalance(payerAta) - empBefore).toBe(BigInt(funded.toString()));
+    // Employer is refunded the worker deposit only; the platform KEEPS its
+    // commission (routed to the treasury ATA), never refunded.
+    expect(tokenBalance(payerAta) - empBefore).toBe(BigInt(TOK_AMT.toString()));
+    expect(tokenBalance(treasuryAta) - treBefore).toBe(
+      BigInt(commission(TOK_AMT).toString()),
+    );
     expect(tokenBalance(ctx.vaultAta)).toBe(0n);
     expect(decodeEscrow(ctx.escrow).status.cancelled).toBeDefined();
   });
@@ -1096,6 +1107,8 @@ describe("token escrow", () => {
         vaultTokenAccount: vaultAta,
         employer: payer.publicKey,
         employerTokenAccount: payerAta,
+        feeRecipient: treasury.publicKey,
+        platformTokenAccount: treasuryAta,
         signer: payer.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
       })
@@ -1246,6 +1259,7 @@ describe("disputes", () => {
     expect(decodeEscrow(ctx.escrow).status.disputed).toBeDefined();
 
     const empBefore = balance(ctx.employee.publicKey);
+    const treBefore = balance(treasury.publicKey);
     const share = SOL_AMT.divn(2);
     const resolveIx = await program.methods
       .resolveDisputeSol(share)
@@ -1254,13 +1268,19 @@ describe("disputes", () => {
         escrowVault: ctx.vault,
         employer: payer.publicKey,
         employee: ctx.employee.publicKey,
+        feeRecipient: treasury.publicKey,
         platformAuthority: ctx.platformAuthority.publicKey,
         systemProgram: SystemProgram.programId,
       })
       .instruction();
     send([resolveIx], [ctx.platformAuthority]);
 
+    // Worker gets their share; the platform KEEPS the full commission (routed
+    // to the treasury), never refunded to the employer.
     expect(balance(ctx.employee.publicKey) - empBefore).toBe(share.toNumber());
+    expect(balance(treasury.publicKey) - treBefore).toBe(
+      commission(SOL_AMT).toNumber(),
+    );
     expect(balance(ctx.vault)).toBe(0);
     expect(decodeEscrow(ctx.escrow).status.resolved).toBeDefined();
   });
@@ -1277,6 +1297,7 @@ describe("disputes", () => {
       .instruction();
     send([raiseIx]);
 
+    const treBefore = tokenBalance(treasuryAta);
     const share = TOK_AMT.divn(2);
     const resolveIx = await program.methods
       .resolveDisputeToken(share)
@@ -1288,6 +1309,8 @@ describe("disputes", () => {
         employerTokenAccount: payerAta,
         employee: ctx.employee.publicKey,
         employeeTokenAccount: employeeAta,
+        feeRecipient: treasury.publicKey,
+        platformTokenAccount: treasuryAta,
         platformAuthority: ctx.platformAuthority.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
         associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -1296,7 +1319,12 @@ describe("disputes", () => {
       .instruction();
     send([resolveIx], [ctx.platformAuthority]);
 
+    // Worker gets their share; the platform KEEPS the full commission (routed
+    // to the treasury ATA), never refunded to the employer.
     expect(tokenBalance(employeeAta)).toBe(BigInt(share.toString()));
+    expect(tokenBalance(treasuryAta) - treBefore).toBe(
+      BigInt(commission(TOK_AMT).toString()),
+    );
     expect(tokenBalance(ctx.vaultAta)).toBe(0n);
     expect(decodeEscrow(ctx.escrow).status.resolved).toBeDefined();
   });
@@ -1357,6 +1385,7 @@ describe("disputes", () => {
         escrowVault: ctx.vault,
         employee: ctx.employee.publicKey,
         employer: payer.publicKey,
+        feeRecipient: treasury.publicKey,
         caller: payer.publicKey,
         systemProgram: SystemProgram.programId,
       })
@@ -1365,7 +1394,7 @@ describe("disputes", () => {
   });
 
   // ── CLOCK-WARP tests: impossible against a live validator. ──────────────────
-  test("trigger_auto_release_sol AFTER deadline pays worker; commission refunded to employer", async () => {
+  test("trigger_auto_release_sol AFTER deadline pays worker; platform keeps commission", async () => {
     const ctx = newSolEscrow();
     await createSolEscrow(ctx);
     await depositSol(ctx);
@@ -1380,7 +1409,6 @@ describe("disputes", () => {
     warpBy(5 * DAY + 60);
 
     const empBefore = balance(ctx.employee.publicKey);
-    const employerBefore = balance(payer.publicKey);
     const treBefore = balance(treasury.publicKey);
     const triggerIx = await program.methods
       .triggerAutoReleaseSol()
@@ -1389,24 +1417,26 @@ describe("disputes", () => {
         escrowVault: ctx.vault,
         employee: ctx.employee.publicKey,
         employer: payer.publicKey,
+        feeRecipient: treasury.publicKey,
         caller: payer.publicKey,
         systemProgram: SystemProgram.programId,
       })
       .instruction();
     send([triggerIx]);
 
-    // Worker gets the full remaining amount; no platform fee; commission refunded to employer.
+    // Worker gets the full remaining amount; the platform KEEPS the commission
+    // (routed to the treasury), never refunded to the employer.
     expect(balance(ctx.employee.publicKey) - empBefore).toBe(
       SOL_AMT.toNumber(),
     );
-    expect(balance(treasury.publicKey) - treBefore).toBe(0);
-    // Employer recovers the commission that was sitting in the vault (minus the tx fee they paid).
-    expect(balance(payer.publicKey)).toBeGreaterThan(employerBefore);
+    expect(balance(treasury.publicKey) - treBefore).toBe(
+      commission(SOL_AMT).toNumber(),
+    );
     expect(balance(ctx.vault)).toBe(0);
     expect(decodeEscrow(ctx.escrow).status.resolved).toBeDefined();
   });
 
-  test("trigger_auto_release_token AFTER deadline pays worker; commission refunded to employer", async () => {
+  test("trigger_auto_release_token AFTER deadline pays worker; platform keeps commission", async () => {
     const ctx = newTokenEscrow();
     await createTokenEscrow(ctx);
     await depositToken(ctx);
@@ -1433,6 +1463,8 @@ describe("disputes", () => {
         employeeTokenAccount: employeeAta,
         employer: payer.publicKey,
         employerTokenAccount: payerAta,
+        feeRecipient: treasury.publicKey,
+        platformTokenAccount: treasuryAta,
         caller: payer.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
         associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -1441,13 +1473,15 @@ describe("disputes", () => {
       .instruction();
     send([triggerIx]);
 
+    // Worker gets the full remaining amount; the platform KEEPS the commission
+    // (routed to the treasury ATA); the employer no longer recovers it.
     expect(tokenBalance(employeeAta) - empBefore).toBe(
       BigInt(TOK_AMT.toString()),
     );
-    expect(tokenBalance(treasuryAta) - treBefore).toBe(0n); // no platform fee on forced release
-    expect(tokenBalance(payerAta) - employerBefore).toBe(
+    expect(tokenBalance(treasuryAta) - treBefore).toBe(
       BigInt(commission(TOK_AMT).toString()),
     );
+    expect(tokenBalance(payerAta) - employerBefore).toBe(0n);
     expect(tokenBalance(ctx.vaultAta)).toBe(0n);
     expect(decodeEscrow(ctx.escrow).status.resolved).toBeDefined();
   });
@@ -1473,6 +1507,8 @@ describe("disputes", () => {
         employeeTokenAccount: employeeAta,
         employer: payer.publicKey,
         employerTokenAccount: payerAta,
+        feeRecipient: treasury.publicKey,
+        platformTokenAccount: treasuryAta,
         caller: payer.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
         associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,

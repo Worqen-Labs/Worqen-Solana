@@ -6,7 +6,7 @@ use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 /// Accounts required for cancelling a token escrow.
 ///
-/// **v2 authorization rules:**
+/// **Authorization rules:**
 /// - In `Created` state: employer or platform_authority.
 /// - In `Funded` state: platform_authority only.
 ///
@@ -40,13 +40,28 @@ pub struct CancelEscrowToken<'info> {
     )]
     pub employer_token_account: Box<Account<'info, TokenAccount>>,
 
+    /// CHECK: Verified against escrow.fee_recipient
+    #[account(constraint = fee_recipient.key() == escrow.fee_recipient @ EscrowError::InvalidFeeRecipient)]
+    pub fee_recipient: UncheckedAccount<'info>,
+
+    /// Treasury token account — receives the commission. Constrained on owner +
+    /// mint so the platform fee cannot be redirected. The platform keeps its fee
+    /// on cancellation of a funded escrow.
+    #[account(
+        mut,
+        constraint = platform_token_account.owner == escrow.fee_recipient @ EscrowError::Unauthorized,
+        constraint = platform_token_account.mint == escrow.token_mint @ EscrowError::InvalidTokenMint,
+    )]
+    pub platform_token_account: Box<Account<'info, TokenAccount>>,
+
     /// The signer (employer in Created, platform_authority in Funded)
     pub signer: Signer<'info>,
 
     pub token_program: Program<'info, Token>,
 }
 
-/// Cancels token escrow, refunds full vault to employer.
+/// Cancels a token escrow. The employer is refunded the worker deposit; the
+/// platform keeps its commission (routed to the treasury) even on cancellation.
 pub fn handler(ctx: Context<CancelEscrowToken>, reason: Vec<u8>) -> Result<()> {
     let escrow = &mut ctx.accounts.escrow;
     let signer_key = ctx.accounts.signer.key();
@@ -70,14 +85,35 @@ pub fn handler(ctx: Context<CancelEscrowToken>, reason: Vec<u8>) -> Result<()> {
     );
 
     let clock = Clock::get()?;
-    let vault_balance = ctx.accounts.vault_token_account.amount;
+    let remaining_commission = escrow.remaining_commission();
+    let vault_amount = ctx.accounts.vault_token_account.amount;
+    // Platform keeps its commission; the employer is refunded only the rest.
+    let commission_to_treasury = remaining_commission.min(vault_amount);
+    let refund_amount = vault_amount.saturating_sub(commission_to_treasury);
 
     let escrow_id = escrow.escrow_id;
     let bump = escrow.bump;
     let escrow_seeds = &[Escrow::ESCROW_SEED, escrow_id.as_ref(), &[bump]];
     let signer_seeds = &[&escrow_seeds[..]];
 
-    if vault_balance > 0 {
+    // Commission to the treasury first.
+    if commission_to_treasury > 0 {
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.vault_token_account.to_account_info(),
+                    to: ctx.accounts.platform_token_account.to_account_info(),
+                    authority: escrow.to_account_info(),
+                },
+                signer_seeds,
+            ),
+            commission_to_treasury,
+        )?;
+    }
+
+    // Refund the rest (worker deposit + any dust) to the employer.
+    if refund_amount > 0 {
         token::transfer(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
@@ -88,7 +124,7 @@ pub fn handler(ctx: Context<CancelEscrowToken>, reason: Vec<u8>) -> Result<()> {
                 },
                 signer_seeds,
             ),
-            vault_balance,
+            refund_amount,
         )?;
     }
 
@@ -104,16 +140,18 @@ pub fn handler(ctx: Context<CancelEscrowToken>, reason: Vec<u8>) -> Result<()> {
         escrow_id: escrow.escrow_id,
         cancelled_by: signer_key,
         refunded_to: escrow.employer,
-        amount_refunded: escrow.remaining_worker_amount(),
-        commission_refunded: escrow.remaining_commission(),
+        amount_refunded: refund_amount,
+        // Platform keeps its commission on cancellation; nothing is refunded.
+        commission_refunded: 0,
         is_native: false,
         token_mint: escrow.token_mint,
     });
 
     msg!(
-        "Escrow cancelled by {:?}, {} tokens refunded to employer",
+        "Escrow cancelled by {:?}: {} tokens to employer, {} commission to treasury",
         signer_key,
-        vault_balance
+        refund_amount,
+        commission_to_treasury
     );
 
     Ok(())

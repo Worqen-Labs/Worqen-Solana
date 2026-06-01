@@ -5,16 +5,13 @@ use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
-/// Token variant of `trigger_auto_release_sol`: Disputed-state only.
-///
-/// ATAs are `init_if_needed` so parties with no token account can still
-/// receive funds; the caller pays the rent.
+/// Accounts for triggering auto-release of a token escrow.
 #[derive(Accounts)]
 pub struct TriggerAutoReleaseToken<'info> {
     #[account(
         mut,
-        constraint = !escrow.is_native @ EscrowError::NotTokenEscrow,
         constraint = escrow.status == EscrowStatus::Disputed @ EscrowError::InvalidStatus,
+        constraint = !escrow.is_native @ EscrowError::NotTokenEscrow,
     )]
     pub escrow: Box<Account<'info, Escrow>>,
 
@@ -30,7 +27,7 @@ pub struct TriggerAutoReleaseToken<'info> {
     )]
     pub vault_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// CHECK: verified against escrow.employee
+    /// CHECK: Verified against escrow.employee
     #[account(constraint = employee.key() == escrow.employee @ EscrowError::Unauthorized)]
     pub employee: UncheckedAccount<'info>,
 
@@ -42,7 +39,7 @@ pub struct TriggerAutoReleaseToken<'info> {
     )]
     pub employee_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// CHECK: verified against escrow.employer
+    /// CHECK: Verified against escrow.employer
     #[account(constraint = employer.key() == escrow.employer @ EscrowError::Unauthorized)]
     pub employer: UncheckedAccount<'info>,
 
@@ -54,7 +51,19 @@ pub struct TriggerAutoReleaseToken<'info> {
     )]
     pub employer_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// Anyone can call. Pays gas + ATA rent if the parties' ATAs need init.
+    /// CHECK: Verified against escrow.fee_recipient
+    #[account(constraint = fee_recipient.key() == escrow.fee_recipient @ EscrowError::InvalidFeeRecipient)]
+    pub fee_recipient: UncheckedAccount<'info>,
+
+    /// Treasury token account — receives the commission. Constrained on owner +
+    /// mint so the platform fee cannot be redirected.
+    #[account(
+        mut,
+        constraint = platform_token_account.owner == escrow.fee_recipient @ EscrowError::Unauthorized,
+        constraint = platform_token_account.mint == escrow.token_mint @ EscrowError::InvalidTokenMint,
+    )]
+    pub platform_token_account: Box<Account<'info, TokenAccount>>,
+
     #[account(mut)]
     pub caller: Signer<'info>,
 
@@ -63,10 +72,12 @@ pub struct TriggerAutoReleaseToken<'info> {
     pub system_program: Program<'info, System>,
 }
 
+/// After the dispute deadline, anyone can release the full remaining worker
+/// amount to the employee. The platform keeps its commission (routed to the
+/// treasury); only any dust is swept to the employer.
 pub fn handler(ctx: Context<TriggerAutoReleaseToken>) -> Result<()> {
     let escrow = &mut ctx.accounts.escrow;
     let clock = Clock::get()?;
-    let caller_key = ctx.accounts.caller.key();
 
     require!(
         escrow.dispute_deadline != 0,
@@ -77,15 +88,14 @@ pub fn handler(ctx: Context<TriggerAutoReleaseToken>) -> Result<()> {
         EscrowError::DisputeDeadlineNotReached
     );
 
+    let remaining_worker = escrow.remaining_worker_amount();
+    let remaining_commission = escrow.remaining_commission();
+
     let escrow_id = escrow.escrow_id;
     let bump = escrow.bump;
     let escrow_seeds = &[Escrow::ESCROW_SEED, escrow_id.as_ref(), &[bump]];
     let signer_seeds = &[&escrow_seeds[..]];
 
-    let remaining_worker = escrow.remaining_worker_amount();
-    let remaining_commission = escrow.remaining_commission();
-
-    // Pay worker their full remaining amount.
     if remaining_worker > 0 {
         token::transfer(
             CpiContext::new_with_signer(
@@ -101,10 +111,29 @@ pub fn handler(ctx: Context<TriggerAutoReleaseToken>) -> Result<()> {
         )?;
     }
 
-    // Drain remainder (commission + dust) to employer.
+    // Platform keeps its commission: route remaining commission to the treasury
+    // token account before sweeping any dust to the employer.
     ctx.accounts.vault_token_account.reload()?;
-    let total_to_employer = ctx.accounts.vault_token_account.amount;
-    if total_to_employer > 0 {
+    let commission_to_treasury = remaining_commission.min(ctx.accounts.vault_token_account.amount);
+    if commission_to_treasury > 0 {
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.vault_token_account.to_account_info(),
+                    to: ctx.accounts.platform_token_account.to_account_info(),
+                    authority: escrow.to_account_info(),
+                },
+                signer_seeds,
+            ),
+            commission_to_treasury,
+        )?;
+    }
+
+    // Sweep any remaining dust to the employer.
+    ctx.accounts.vault_token_account.reload()?;
+    let dust_to_employer = ctx.accounts.vault_token_account.amount;
+    if dust_to_employer > 0 {
         token::transfer(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
@@ -115,34 +144,34 @@ pub fn handler(ctx: Context<TriggerAutoReleaseToken>) -> Result<()> {
                 },
                 signer_seeds,
             ),
-            total_to_employer,
+            dust_to_employer,
         )?;
     }
 
-    escrow.released_to_employee = escrow.released_to_employee.saturating_add(remaining_worker);
+    escrow.released_to_employee = escrow.amount;
     escrow.status = EscrowStatus::Resolved;
     escrow.completed_at = clock.unix_timestamp;
-    escrow.dispute_resolved_by = caller_key;
+    escrow.dispute_resolved_by = ctx.accounts.caller.key();
     escrow.dispute_resolved_at = clock.unix_timestamp;
     escrow.employee_share_resolved = remaining_worker;
     escrow.employer_share_resolved = 0;
 
     emit!(DisputeResolved {
         escrow_id: escrow.escrow_id,
-        resolver: caller_key,
+        resolver: ctx.accounts.caller.key(),
         employee_share: remaining_worker,
         employer_share: 0,
-        commission_refunded: remaining_commission,
+        // Platform keeps its commission on auto-release; nothing is refunded.
+        commission_refunded: 0,
         is_native: false,
         token_mint: escrow.token_mint,
         forced: true,
     });
 
     msg!(
-        "Dispute force-resolved by {:?} after deadline ({} to worker, {} to employer)",
-        caller_key,
+        "Auto-release triggered: {} tokens to employee, {} commission to treasury",
         remaining_worker,
-        total_to_employer
+        commission_to_treasury
     );
 
     Ok(())

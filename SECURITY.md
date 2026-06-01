@@ -103,3 +103,21 @@ View it on Solscan:
 <https://solscan.io/account/GDCBqN8AVU5i2xXdeTNwBmCCsd9Y8rfiH1JDKA8UjDYh?cluster=devnet>
 
 [sst]: https://github.com/neodyme-labs/solana-security-txt
+
+## v1.1.0 — Commission retained on non-happy-path settlements (2026-06-01)
+
+Earlier versions refunded the platform commission to the employer on dispute
+resolution, auto-release, cancellation, and mutual cancellation, so the platform
+had no financial incentive to stall a dispute. **As of v1.1.0 this is reversed
+by product decision:** the platform retains its full commission on all of these
+paths — routed to the treasury (`fee_recipient`), never returned to the employer.
+Freelancers are unaffected (they receive exactly the amount awarded).
+
+This is a **breaking instruction-signature change**: `resolve_dispute_sol/token`,
+`trigger_auto_release_sol/token`, `cancel_escrow_sol/token`, and
+`mutual_cancel_sol/token` now require the `fee_recipient` account (SOL) or
+`fee_recipient` + `platform_token_account` (token). All off-chain instruction
+builders (backend custodial signing + `escrow.py`, frontend `escrow-program.ts`)
+must pass them in IDL order, and any path that creates the treasury ATA must do
+so idempotently. The anti-stall property is now preserved operationally rather
+than by code (the platform fee no longer depends on the dispute outcome).

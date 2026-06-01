@@ -56,6 +56,20 @@ pub struct ResolveDisputeToken<'info> {
     )]
     pub employee_token_account: Box<Account<'info, TokenAccount>>,
 
+    /// CHECK: Verified against escrow.fee_recipient
+    #[account(constraint = fee_recipient.key() == escrow.fee_recipient @ EscrowError::InvalidFeeRecipient)]
+    pub fee_recipient: UncheckedAccount<'info>,
+
+    /// Treasury token account — receives the commission. Constrained on owner +
+    /// mint so the platform fee cannot be redirected. The platform keeps its fee
+    /// on dispute resolution; it is no longer refunded to the employer.
+    #[account(
+        mut,
+        constraint = platform_token_account.owner == escrow.fee_recipient @ EscrowError::Unauthorized,
+        constraint = platform_token_account.mint == escrow.token_mint @ EscrowError::InvalidTokenMint,
+    )]
+    pub platform_token_account: Box<Account<'info, TokenAccount>>,
+
     /// The platform authority — pays for ATA creation if needed.
     #[account(mut)]
     pub platform_authority: Signer<'info>,
@@ -65,8 +79,10 @@ pub struct ResolveDisputeToken<'info> {
     pub system_program: Program<'info, System>,
 }
 
-/// Platform resolves dispute by splitting remaining worker amount.
-/// Commission proportional to remaining worker is refunded to employer.
+/// Platform resolves a dispute by splitting the remaining worker amount and
+/// KEEPING the commission. The full remaining commission is routed to the
+/// treasury (`platform_token_account`); only the employer's share of the worker
+/// amount (plus any dust) is refunded — the fee is never returned.
 /// Vault is drained to actual balance (sweeps any dust to employer).
 pub fn handler(ctx: Context<ResolveDisputeToken>, employee_share: u64) -> Result<()> {
     let escrow = &mut ctx.accounts.escrow;
@@ -103,8 +119,26 @@ pub fn handler(ctx: Context<ResolveDisputeToken>, employee_share: u64) -> Result
         )?;
     }
 
-    // Drain remaining vault (employer_share + commission_refund + dust)
-    // to employer's token account.
+    // Platform keeps its commission on a dispute: route the full remaining
+    // commission to the treasury token account before refunding the employer.
+    ctx.accounts.vault_token_account.reload()?;
+    let commission_to_treasury = remaining_commission.min(ctx.accounts.vault_token_account.amount);
+    if commission_to_treasury > 0 {
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.vault_token_account.to_account_info(),
+                    to: ctx.accounts.platform_token_account.to_account_info(),
+                    authority: escrow.to_account_info(),
+                },
+                signer_seeds,
+            ),
+            commission_to_treasury,
+        )?;
+    }
+
+    // Drain remaining vault (employer_share + dust) to employer's token account.
     ctx.accounts.vault_token_account.reload()?;
     let total_to_employer = ctx.accounts.vault_token_account.amount;
     if total_to_employer > 0 {
@@ -135,17 +169,18 @@ pub fn handler(ctx: Context<ResolveDisputeToken>, employee_share: u64) -> Result
         resolver: ctx.accounts.platform_authority.key(),
         employee_share,
         employer_share,
-        commission_refunded: remaining_commission,
+        // Platform now keeps its commission on disputes; nothing is refunded.
+        commission_refunded: 0,
         is_native: false,
         token_mint: escrow.token_mint,
         forced: false,
     });
 
     msg!(
-        "Dispute resolved: {} tokens to employee, {} tokens to employer (incl {} commission refund)",
+        "Dispute resolved: {} tokens to employee, {} tokens to employer, {} commission to treasury",
         employee_share,
         total_to_employer,
-        remaining_commission
+        commission_to_treasury
     );
 
     Ok(())
