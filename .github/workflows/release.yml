@@ -47,11 +47,11 @@ jobs:
         run: cargo install solana-verify --locked
 
       - name: Reproducible build (Docker)
-        run: solana-verify build --library-name worqen_escrow
+        run: solana-verify build --library-name worqen_escrow -- --features mainnet
 
       - uses: oven-sh/setup-bun@v2
       - name: IDL (for distribution)
-        run: bun install --frozen-lockfile && anchor build
+        run: bun install --frozen-lockfile && anchor build -- --features mainnet
 
       - name: Hashes + checksums
         run: |
@@ -72,7 +72,7 @@ jobs:
           generate_release_notes: true
           body: |
             Reproducible build of Worqen Escrow ${{ github.ref_name }}.
-            Verify with: `solana-verify verify-from-repo --remote -um --program-id <ID> ${{ github.server_url }}/${{ github.repository }}`
+            Verify with: `solana-verify verify-from-repo --remote -um --program-id <ID> --library-name worqen_escrow ${{ github.server_url }}/${{ github.repository }} -- --features mainnet`
             Program hash: see `program-hash.txt`.
 
   mainnet-buffer:
@@ -94,7 +94,7 @@ jobs:
         run: cargo install solana-verify --locked
 
       - name: Reproducible build (Docker)
-        run: solana-verify build --library-name worqen_escrow
+        run: solana-verify build --library-name worqen_escrow -- --features mainnet
 
       - name: Load buffer fee-payer
         run: |

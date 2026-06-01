@@ -22,6 +22,13 @@ security_txt! {
     auditors: "Pending external audit"
 }
 
+// Program ID is per-cluster. Mainnet builds (`--features mainnet`, used only by
+// release.yml's verifiable build) get their own id; every other build — devnet,
+// localnet, LiteSVM tests, CI — stays on the devnet id. Keep both in sync with
+// Anchor.toml [programs.*] and the backend/frontend ESCROW_PROGRAM_ID env.
+#[cfg(feature = "mainnet")]
+declare_id!("HShWcYbT6wGrndgauQxNrcNJuJQ1BX9CVZqFSn9Q7rNs");
+#[cfg(not(feature = "mainnet"))]
 declare_id!("6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ");
 
 /// Trustless payment escrow for the Worqen job marketplace (native SOL and an

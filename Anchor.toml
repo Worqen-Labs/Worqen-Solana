@@ -11,6 +11,10 @@ worqen_escrow = "6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ"
 [programs.localnet]
 worqen_escrow = "6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ"
 
+# Mainnet program id — used only by `--features mainnet` builds (see src/lib.rs).
+[programs.mainnet]
+worqen_escrow = "HShWcYbT6wGrndgauQxNrcNJuJQ1BX9CVZqFSn9Q7rNs"
+
 [registry]
 url = "https://api.apr.dev"
 

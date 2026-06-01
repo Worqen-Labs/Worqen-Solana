@@ -19,6 +19,9 @@ no-log-ix-name = []
 cpi = ["no-entrypoint"]
 idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 default = []
+# Selects the mainnet program id in declare_id! (src/lib.rs). Enabled only by
+# release.yml's verifiable build; absent for devnet/localnet/tests/CI.
+mainnet = []
 
 [dependencies]
 anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
