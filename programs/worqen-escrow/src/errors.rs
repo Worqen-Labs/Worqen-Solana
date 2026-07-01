@@ -147,4 +147,43 @@ pub enum EscrowError {
 
     #[msg("Top-up requires the escrow to be Funded")]
     TopUpNotFunded,
+
+    #[msg("Staged amount would exceed the weekly cap")]
+    WeeklyCapExceeded,
+
+    #[msg("Weekly tranche limit (7) reached")]
+    TrancheLimitReached,
+
+    #[msg("Tranche is not in Frozen status")]
+    TrancheNotFrozen,
+
+    #[msg("Tranche is not in Disputed status")]
+    TrancheNotDisputed,
+
+    #[msg("Tranche review window has not elapsed")]
+    TrancheWindowNotElapsed,
+
+    #[msg("Cannot dispute after the tranche review window has opened")]
+    DisputeWindowClosed,
+
+    #[msg("Tranche index out of bounds")]
+    InvalidTrancheIndex,
+
+    #[msg("Vault balance insufficient to back this earmark")]
+    VaultUnderfunded,
+
+    #[msg("employee_share exceeds the tranche amount")]
+    HourlyEmployeeShareExceedsTranche,
+
+    #[msg("Weekly cap can only be raised, never lowered")]
+    CapCannotDecrease,
+
+    #[msg("Weekly cap cannot drop below already-staged total")]
+    CapBelowStaged,
+
+    #[msg("Period vault already funded to the current cap_gross")]
+    PeriodFullyFunded,
+
+    #[msg("Period has live earmarks; cannot close")]
+    HourlyPeriodNotTerminal,
 }

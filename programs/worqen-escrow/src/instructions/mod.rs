@@ -33,6 +33,18 @@ pub mod trigger_auto_release_sol;
 pub mod trigger_auto_release_token;
 pub mod update_platform_authority;
 
+pub mod close_period;
+pub mod finalize_tranche;
+pub mod fund_period;
+pub mod open_period;
+pub mod pull_fund_period;
+pub mod raise_hourly_dispute;
+pub mod raise_weekly_cap;
+pub mod refund_remainder;
+pub mod resolve_hourly_tranche;
+pub mod stage_tranche;
+pub mod trigger_hourly_auto_release;
+
 pub use batch_pay_with_commission_sol::*;
 pub use batch_pay_with_commission_token::*;
 pub use cancel_escrow_sol::*;
@@ -62,3 +74,15 @@ pub use resolve_dispute_token::*;
 pub use trigger_auto_release_sol::*;
 pub use trigger_auto_release_token::*;
 pub use update_platform_authority::*;
+
+pub use close_period::*;
+pub use finalize_tranche::*;
+pub use fund_period::*;
+pub use open_period::*;
+pub use pull_fund_period::*;
+pub use raise_hourly_dispute::*;
+pub use raise_weekly_cap::*;
+pub use refund_remainder::*;
+pub use resolve_hourly_tranche::*;
+pub use stage_tranche::*;
+pub use trigger_hourly_auto_release::*;
