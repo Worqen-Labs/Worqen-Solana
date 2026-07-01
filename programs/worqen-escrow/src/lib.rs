@@ -310,4 +310,74 @@ pub mod worqen_escrow {
     pub fn mutual_cancel_token(ctx: Context<MutualCancelToken>, employee_share: u64) -> Result<()> {
         instructions::mutual_cancel_token::handler(ctx, employee_share)
     }
+
+    pub fn open_period(
+        ctx: Context<OpenPeriod>,
+        hire_id: [u8; 32],
+        period_index: u32,
+        weekly_cap_net: u64,
+        commission_rate_bps: u16,
+        review_window_secs: i64,
+    ) -> Result<()> {
+        instructions::open_period::handler(
+            ctx,
+            hire_id,
+            period_index,
+            weekly_cap_net,
+            commission_rate_bps,
+            review_window_secs,
+        )
+    }
+
+    pub fn fund_period(ctx: Context<FundPeriod>) -> Result<()> {
+        instructions::fund_period::handler(ctx)
+    }
+
+    pub fn pull_fund_period(ctx: Context<PullFundPeriod>) -> Result<()> {
+        instructions::pull_fund_period::handler(ctx)
+    }
+
+    pub fn raise_weekly_cap(ctx: Context<RaiseWeeklyCap>, new_weekly_cap_net: u64) -> Result<()> {
+        instructions::raise_weekly_cap::handler(ctx, new_weekly_cap_net)
+    }
+
+    pub fn stage_tranche(ctx: Context<StageTranche>, amount: u64) -> Result<()> {
+        instructions::stage_tranche::handler(ctx, amount)
+    }
+
+    pub fn finalize_tranche(ctx: Context<FinalizeTranche>, index: u8) -> Result<()> {
+        instructions::finalize_tranche::handler(ctx, index)
+    }
+
+    pub fn raise_hourly_dispute(
+        ctx: Context<RaiseHourlyDispute>,
+        index: u8,
+        dispute_deadline: i64,
+        reason: Vec<u8>,
+    ) -> Result<()> {
+        instructions::raise_hourly_dispute::handler(ctx, index, dispute_deadline, reason)
+    }
+
+    pub fn resolve_hourly_tranche(
+        ctx: Context<ResolveHourlyTranche>,
+        index: u8,
+        employee_share: u64,
+    ) -> Result<()> {
+        instructions::resolve_hourly_tranche::handler(ctx, index, employee_share)
+    }
+
+    pub fn trigger_hourly_auto_release(
+        ctx: Context<TriggerHourlyAutoRelease>,
+        index: u8,
+    ) -> Result<()> {
+        instructions::trigger_hourly_auto_release::handler(ctx, index)
+    }
+
+    pub fn refund_remainder(ctx: Context<RefundRemainder>) -> Result<()> {
+        instructions::refund_remainder::handler(ctx)
+    }
+
+    pub fn close_period(ctx: Context<ClosePeriod>) -> Result<()> {
+        instructions::close_period::handler(ctx)
+    }
 }
