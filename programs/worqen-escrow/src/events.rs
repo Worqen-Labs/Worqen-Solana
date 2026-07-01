@@ -189,3 +189,99 @@ pub struct EscrowSettled {
     pub is_native: bool,
     pub token_mint: Pubkey,
 }
+
+#[event]
+pub struct HourlyPeriodOpened {
+    pub hire_id: [u8; 32],
+    pub period_index: u32,
+    pub employer: Pubkey,
+    pub employee: Pubkey,
+    pub platform_authority: Pubkey,
+    pub fee_recipient: Pubkey,
+    pub token_mint: Pubkey,
+    pub weekly_cap_net: u64,
+    pub commission_rate_bps: u16,
+    pub review_window_secs: i64,
+}
+
+#[event]
+pub struct HourlyPeriodFunded {
+    pub hire_id: [u8; 32],
+    pub period_index: u32,
+    pub amount_funded: u64,
+    pub total_funded: u64,
+    pub cap_gross: u64,
+    pub via_delegate: bool,
+    pub token_mint: Pubkey,
+}
+
+#[event]
+pub struct HourlyCapRaised {
+    pub hire_id: [u8; 32],
+    pub period_index: u32,
+    pub old_cap_net: u64,
+    pub new_cap_net: u64,
+}
+
+#[event]
+pub struct TrancheStaged {
+    pub hire_id: [u8; 32],
+    pub period_index: u32,
+    pub tranche_index: u8,
+    pub amount: u64,
+    pub commission: u64,
+    pub release_at: i64,
+    pub total_staged_net: u64,
+}
+
+#[event]
+pub struct TrancheFinalized {
+    pub hire_id: [u8; 32],
+    pub period_index: u32,
+    pub tranche_index: u8,
+    pub recipient: Pubkey,
+    pub amount: u64,
+    pub commission: u64,
+    pub commission_recipient: Pubkey,
+    pub forced: bool,
+    pub token_mint: Pubkey,
+}
+
+#[event]
+pub struct HourlyDisputeRaised {
+    pub hire_id: [u8; 32],
+    pub period_index: u32,
+    pub tranche_index: u8,
+    pub raised_by: Pubkey,
+    pub raised_at: i64,
+    pub dispute_deadline: i64,
+}
+
+#[event]
+pub struct HourlyTrancheResolved {
+    pub hire_id: [u8; 32],
+    pub period_index: u32,
+    pub tranche_index: u8,
+    pub employee_share: u64,
+    pub employer_share: u64,
+    pub commission_to_treasury: u64,
+    pub commission_refunded: u64,
+    pub forced: bool,
+    pub token_mint: Pubkey,
+}
+
+#[event]
+pub struct HourlyRemainderRefunded {
+    pub hire_id: [u8; 32],
+    pub period_index: u32,
+    pub refunded: u64,
+    pub liabilities_outstanding: u64,
+    pub token_mint: Pubkey,
+}
+
+#[event]
+pub struct HourlyPeriodClosed {
+    pub hire_id: [u8; 32],
+    pub period_index: u32,
+    pub tokens_swept: u64,
+}
