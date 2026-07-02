@@ -1,6 +1,6 @@
 # Worqen Escrow
 
-Trustless payment escrow and direct‑pay settlement for the [Worqen](https://worqen.com) job marketplace, written in Rust with the [Anchor](https://www.anchor-lang.com) framework on Solana. Employers lock funds in a program‑owned vault when they hire; workers are paid only after confirmation, with **platform‑mediated dispute resolution** and a permissionless **deadline safety net** so funds can never be stranded by an unresponsive platform. The program settles in native **SOL** and an **allowlisted set of SPL stablecoins** (USDC / USDT / EURC), charges a **fee‑on‑top commission** routed to a dedicated treasury, and also offers a non‑escrow **direct‑pay** path (single, batch, and tips) for trusted hires.
+Trustless payment escrow and direct‑pay settlement for the [Worqen](https://worqen.com) job marketplace, written in Rust with the [Anchor](https://www.anchor-lang.com) framework on Solana. Employers lock funds in a program‑owned vault when they hire; workers are paid only after confirmation, with **platform‑mediated dispute resolution** and a permissionless **deadline safety net** so funds can never be stranded by an unresponsive platform. The program settles in native **SOL** and an **allowlisted set of SPL stablecoins** (USDC / USDT / EURC), charges a **fee‑on‑top commission** routed to a dedicated treasury, and also offers a non‑escrow **direct‑pay** path (single, batch, and tips) for trusted hires. For ongoing hourly work it adds a dedicated **weekly settlement engine (GWS — "guaranteed weekly settlement")**: the employer pre‑funds a capped weekly vault, the platform freezes each approved block of hours as a **tranche** with a review window, and every tranche pays out permissionlessly once its window elapses — with the same platform‑mediated dispute and deadline safety net, applied per tranche.
 
 [![Anchor](https://img.shields.io/badge/Anchor-0.32.1-blue)](https://www.anchor-lang.com)
 [![Solana](https://img.shields.io/badge/Solana-devnet-9945FF)](https://solana.com)
@@ -29,6 +29,15 @@ Trustless payment escrow and direct‑pay settlement for the [Worqen](https://wo
 ---
 
 ## 2. Core concepts
+
+### Two settlement engines
+
+The program ships **two independent settlement engines** that share one Config, treasury, commission model, and pause switch:
+
+1. **`Escrow`** — the per‑milestone / fixed‑price vault documented throughout this section (create → fund → confirm → release, plus disputes, direct‑pay, and batch pay). Its `escrow_kind` tag can also mark a lightweight `HOURLY`/`RETAINER` top‑up + draw‑down flow (see flow (c)).
+2. **`HourlyPeriod`** — a dedicated **weekly hourly‑settlement (GWS)** account for ongoing hourly work: a capped, pre‑funded weekly vault whose approved blocks of hours are frozen as **tranches** and settled permissionlessly after a review window (see flow (j), the `HourlyPeriod` schema, and the hourly instruction table).
+
+Both engines use the same four roles (**employer / employee / platform_authority / treasury**) and the same fee‑on‑top commission, but different account types and PDAs. The `HourlyPeriod` engine is **SPL‑token only**; the `Escrow` engine handles both native SOL and SPL tokens. The sections below describe the `Escrow` engine unless they say otherwise.
 
 ### The three‑party model + the treasury
 
@@ -75,7 +84,7 @@ The tier constants are informational; the **effective `bps` is supplied per inst
 
 Escrows are **per‑milestone**, not per‑hire. A multi‑milestone hire creates one escrow per milestone, linked off‑chain by `escrow_group_id` (an off‑chain SHA‑256 of the hire id), with `sequence_in_group` / `total_in_group` so an indexer can collect all milestones of a hire without an off‑chain join. Ungrouped escrows set the group id to zero bytes and the sequence/total to 0.
 
-An `escrow_kind` tag (`u8`, not a closed enum so new kinds can be added without a schema migration) classifies the product flow: `MILESTONE = 0`, `HOURLY = 1`, `RETAINER = 2`, `OTHER = 255`.
+An `escrow_kind` tag (`u8`, not a closed enum so new kinds can be added without a schema migration) classifies the product flow: `MILESTONE = 0`, `HOURLY = 1`, `RETAINER = 2`, `OTHER = 255`. This tag lives on the `Escrow` account; the dedicated weekly `HourlyPeriod` engine (flow (j)) is a separate account type, not an `escrow_kind`.
 
 ### PDAs
 
@@ -166,25 +175,25 @@ sequenceDiagram
     participant P as Program
     participant Plat as platform_authority
     participant Anyone as Anyone
-    Party->>P: raise_dispute(reason, deadline in [+3d,+90d]) -> Disputed
+    Party->>P: raise_dispute(reason, deadline 3d..90d) then Disputed
     alt Platform mediates in time
         Plat->>P: resolve_dispute_*(employee_share)
-        P-->>P: split worker amount; commission refunded to employer -> Resolved
+        P-->>P: split worker amount, commission to treasury, then Resolved
     else Deadline passes, platform silent
         Anyone->>P: trigger_auto_release_* (permissionless)
-        P-->>P: pay worker remaining amount; commission refunded to employer -> Resolved (forced=true)
+        P-->>P: pay worker remaining, commission to treasury, Resolved (forced)
     end
 ```
 
-`dispute_deadline` is **mandatory** and bounded to `[now + 3 days, now + 90 days]`. The 3‑day minimum guarantees the platform always has time to mediate before anyone can force‑resolve (this closes a self‑dispute‑then‑instant‑payout hole). After the deadline, **anyone** can call `trigger_auto_release_*` to pay the worker — the platform forfeits commission on any dispute, so it has no incentive to stall. In `Funded` either party may dispute; in `PendingRelease` only the employer may (the worker is already committed by the prior confirm).
+`dispute_deadline` is **mandatory** and bounded to `[now + 3 days, now + 90 days]`. The 3‑day minimum guarantees the platform always has time to mediate before anyone can force‑resolve (this closes a self‑dispute‑then‑instant‑payout hole). After the deadline, **anyone** can call `trigger_auto_release_*` to pay the worker, so an unresponsive platform can never strand a worker's funds. As of v1.1.0 the platform **retains** its commission on a resolved or force-resolved dispute (routed to the treasury, never to the ops key). In `Funded` either party may dispute; in `PendingRelease` only the employer may (the worker is already committed by the prior confirm).
 
 ### (g) Mutual cancel (amicable settle, both sign)
 
-`mutual_cancel_sol` / `mutual_cancel_token` lets the **employer and employee both sign** to split a non‑terminal (`Funded` / `PendingRelease`) escrow without a dispute or platform involvement. `employee_share` (≤ remaining worker amount) goes to the worker; the remainder, the commission refund, and any dust go to the employer. Status → `Resolved`.
+`mutual_cancel_sol` / `mutual_cancel_token` lets the **employer and employee both sign** to split a non‑terminal (`Funded` / `PendingRelease`) escrow without a dispute or platform involvement. `employee_share` (≤ remaining worker amount) goes to the worker; the remainder and any dust go to the employer, while the commission is retained by the treasury. Status → `Resolved`.
 
 ### (h) Cancel + close / close‑unfunded (rent recovery)
 
-- **Cancel** (`cancel_escrow_*`): in `Created`, the employer or platform may cancel; once `Funded`, **only the platform** may cancel (the employer must dispute instead of unilaterally reclaiming funds the worker may have started against). Full vault refund to employer.
+- **Cancel** (`cancel_escrow_*`): in `Created`, the employer or platform may cancel; once `Funded`, **only the platform** may cancel (the employer must dispute instead of unilaterally reclaiming funds the worker may have started against). The worker deposit refunds to the employer; any commission collected while funded is retained by the treasury.
 - **Close** (`close_escrow_*`): on a terminal escrow, employer **or** platform sweeps any vault dust and refunds the escrow account's rent (~0.005 SOL) to the employer.
 - **Close‑unfunded** (`close_unfunded_escrow_*`): reclaims rent on a `Cancelled` escrow that was **never funded** (`funded_at == 0`); for SOL no vault is involved, for tokens no vault ATA was ever created.
 
@@ -192,9 +201,42 @@ sequenceDiagram
 
 A tip is just a direct payment at the tip rate: `pay_with_commission_*` with `commission_bps = 200` (2%). No escrow account is involved.
 
+### (j) Hourly weekly settlement — GWS (`HourlyPeriod`)
+
+For ongoing hourly engagements, the dedicated **`HourlyPeriod`** engine gives the worker a *guaranteed weekly settlement*: the employer pre‑funds a capped vault for the week, and each approved block of hours is **frozen** on‑chain for a review window, then paid out automatically. One period account exists per `(hire_id, period_index)` (one week), is **SPL‑token only** (USDC / USDT / EURC), and holds up to **7 tranches**.
+
+```mermaid
+sequenceDiagram
+    participant E as Employer
+    participant Plat as platform_authority
+    participant P as Program
+    participant V as Period Vault
+    participant W as Worker
+    participant T as Treasury
+    Plat->>P: open_period (hire, week, weekly_cap_net, bps, window)
+    E->>P: fund_period (tops vault up to cap_gross)
+    Plat->>P: stage_tranche (net) then Tranche Frozen (release_at = now + window)
+    Note over P,V: more tranches may be staged, up to 7 and within the cap
+    W->>P: finalize_tranche (idx), permissionless after release_at
+    P->>W: tranche net amount
+    P->>T: tranche commission
+    E->>P: refund_remainder (unearmarked funds back to employer)
+    E->>P: close_period (sweep residue + reclaim rent)
+```
+
+**Cap and funding.** `weekly_cap_net` is the most *net* pay the worker can earn that week; the vault is funded to `cap_gross = weekly_cap_net + commission(weekly_cap_net)`. `fund_period` (employer signs) tops the vault up to `cap_gross`. `pull_fund_period` does the same **permissionlessly** by pulling from the employer's token account through a pre‑approved **SPL delegate** (PDA `[b"delegate_auth"]`), so the backend can keep a period funded without the employer signing each time. `raise_weekly_cap` (employer or platform) can only **increase** the cap, and never below the already‑staged total.
+
+**Tranches.** `stage_tranche` (platform signs) freezes a `net` block of hours: it books the marginal commission, sets `release_at = now + review_window_secs` (default **7 days**, max 30), and requires the vault to already cover every live tranche plus this one (`VaultUnderfunded` otherwise). A period holds at most **7** tranches.
+
+**Settlement.** After `release_at`, **anyone** can call `finalize_tranche` to pay the worker that tranche's net amount and route its commission to the treasury — the permissionless guarantee that approved work is always paid, even if the platform goes quiet.
+
+**Disputes.** Before a tranche's window elapses, the employer, worker, or platform can `raise_hourly_dispute(idx, deadline, reason)` (deadline bounded to `[now + 3 days, now + 90 days]`), moving that tranche to `Disputed`. The platform then `resolve_hourly_tranche(idx, employee_share)`: the worker gets `employee_share`, the treasury keeps commission **proportional to that share**, and the employer is refunded the remainder (the unpaid worker amount plus the un‑earned commission). If the platform never acts, after the deadline **anyone** can `trigger_hourly_auto_release(idx)` to pay the worker the full tranche (commission to treasury) — the same platform‑failure safety net as the milestone escrow, applied per tranche.
+
+**Wind‑down.** `refund_remainder` (employer or platform) returns any vault funds **not** earmarked by a live tranche to the employer at week's end. `close_period` (employer or platform, once no tranche is live) sweeps any residue to the employer, closes the account, and refunds its rent.
+
 ---
 
-## 4. Instruction reference (33 total)
+## 4. Instruction reference (44 total)
 
 ### Config (5)
 
@@ -230,16 +272,16 @@ A tip is just a direct payment at the tip rate: `pay_with_commission_*` with `co
 | Instruction | Who signs | Precondition | Effect |
 |---|---|---|---|
 | `raise_dispute` | employer or employee (employer‑only in `PendingRelease`) | `Funded`/`PendingRelease`; deadline in `[now+3d, now+90d]`; reason <= 256 B | Freezes funds → `Disputed` |
-| `resolve_dispute_sol` | `platform_authority` | `Disputed`; native; `employee_share <= remaining` | Splits remaining worker amount; commission refunded to employer → `Resolved` |
+| `resolve_dispute_sol` | `platform_authority` | `Disputed`; native; `employee_share <= remaining` | Splits remaining worker amount; commission retained by treasury → `Resolved` |
 | `resolve_dispute_token` | `platform_authority` | `Disputed`; SPL | Token variant |
-| `trigger_auto_release_sol` | **anyone** (pays gas) | `Disputed`; native; `now >= dispute_deadline` | Pays worker remaining; commission refunded to employer → `Resolved (forced)` |
+| `trigger_auto_release_sol` | **anyone** (pays gas) | `Disputed`; native; `now >= dispute_deadline` | Pays worker remaining; commission retained by treasury → `Resolved (forced)` |
 | `trigger_auto_release_token` | **anyone** | `Disputed`; SPL; deadline reached | Token variant |
 
 ### Cancel & close (6)
 
 | Instruction | Who signs | Precondition | Effect |
 |---|---|---|---|
-| `cancel_escrow_sol` | employer (in `Created`) or platform (in `Created`/`Funded`) | `Created` or `Funded`; native; reason <= 128 B | Full refund to employer → `Cancelled` |
+| `cancel_escrow_sol` | employer (in `Created`) or platform (in `Created`/`Funded`) | `Created` or `Funded`; native; reason <= 128 B | Refunds worker deposit to employer; commission retained by treasury if funded → `Cancelled` |
 | `cancel_escrow_token` | same as above | `Created` or `Funded`; SPL | Token variant |
 | `close_escrow_sol` | employer or platform | terminal status; native | Sweeps dust + refunds rent to employer; closes account |
 | `close_escrow_token` | employer or platform | terminal status; SPL; vault empty | Sweeps residual tokens + refunds all rent; closes |
@@ -252,7 +294,7 @@ A tip is just a direct payment at the tip rate: `pay_with_commission_*` with `co
 |---|---|---|---|
 | `deposit_more_sol` | employer | `Funded`; native | Raises `amount`, recomputes commission on new total, deposits the delta |
 | `deposit_more_token` | employer | `Funded`; SPL | Token variant |
-| `mutual_cancel_sol` | employer **and** employee | `Funded`/`PendingRelease`; native; `employee_share <= remaining` | Amicable split; commission refunded to employer → `Resolved` |
+| `mutual_cancel_sol` | employer **and** employee | `Funded`/`PendingRelease`; native; `employee_share <= remaining` | Amicable split; commission retained by treasury → `Resolved` |
 | `mutual_cancel_token` | employer **and** employee | `Funded`/`PendingRelease`; SPL | Token variant |
 
 ### Direct pay — no escrow (4)
@@ -263,6 +305,22 @@ A tip is just a direct payment at the tip rate: `pay_with_commission_*` with `co
 | `pay_with_commission_token` | payer | not paused; mint allowed; SPL | Token variant |
 | `batch_pay_with_commission_sol` | payer | not paused; 1–16 recipients; `len(amounts)==recipients`; no self‑pay | Fans out to many recipients; one commission on total to treasury |
 | `batch_pay_with_commission_token` | payer | not paused; mint allowed; 1–16 ATAs | Token variant |
+
+### Hourly weekly settlement — `HourlyPeriod` (11, SPL only)
+
+| Instruction | Who signs | Precondition | Effect |
+|---|---|---|---|
+| `open_period` | payer (backend) | not paused; mint allowed; `weekly_cap_net > 0`; `bps <= 1000`; parties distinct; `review_window ∈ (0, 30d]` | Creates the `HourlyPeriod` PDA + vault/employee/treasury ATAs → `Open` |
+| `fund_period` | employer | `Open`/`Funded`/`Active` | Moves the shortfall up to `cap_gross` from the employer into the vault; first fund → `Funded` |
+| `pull_fund_period` | **anyone** | `Open`/`Funded`/`Active`; employer ATA delegated to `[b"delegate_auth"]` | Permissionless top‑up to `cap_gross` via the SPL delegate |
+| `raise_weekly_cap` | employer or platform | `Open`/`Funded`/`Active`; `new >= cap` and `>= total_staged` | Raises `weekly_cap_net` (can never lower it) |
+| `stage_tranche` | `platform_authority` | `Funded`/`Active`; `< 7` tranches; `total_staged + net <= cap`; vault covers live + new | Freezes a tranche (`release_at = now + window`); first stage → `Active` |
+| `finalize_tranche` | **anyone** | tranche `Frozen`; `now >= release_at` | Pays worker the tranche net + commission to treasury → tranche `Finalized` |
+| `raise_hourly_dispute` | employer, employee, or platform | tranche `Frozen`; `now < release_at`; deadline in `[now+3d, now+90d]`; reason <= 256 B | Freezes the tranche → `Disputed` |
+| `resolve_hourly_tranche` | `platform_authority` | tranche `Disputed`; `employee_share <= tranche` | Splits the tranche; treasury keeps commission on the paid share, employer refunded the rest → `Resolved` |
+| `trigger_hourly_auto_release` | **anyone** | tranche `Disputed`; `now >= dispute_deadline` | Pays worker the full tranche (commission to treasury) → `Resolved (forced)` |
+| `refund_remainder` | employer or platform | any status | Refunds vault funds not earmarked by a live tranche to the employer → `Refunded` (or `Settling` if earmarks remain) |
+| `close_period` | employer or platform | no live (`Frozen`/`Disputed`) tranche | Sweeps residual tokens to employer, closes the account, refunds rent |
 
 ---
 
@@ -320,9 +378,37 @@ A tip is just a direct payment at the tip rate: `pay_with_commission_*` with `co
 | `terms_hash` | `[u8; 32]` | Optional tamper‑evident hash of agreed terms/invoice (zero = none) |
 | `reserved` | `[u8; 64]` | Forward‑compat padding |
 
+### `HourlyPeriod` (PDA `[b"hourly", hire_id, period_index]`)
+
+The weekly hourly‑settlement account (GWS). **SPL‑token only** — there is no native‑SOL variant.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `version` | `u8` | Schema version (`HOURLY_PERIOD_VERSION = 1`) |
+| `hire_id` | `[u8; 32]` | Off‑chain hire id; PDA seed |
+| `period_index` | `u32` | Week index within the hire; PDA seed |
+| `employer` / `employee` | `Pubkey` | Payer / worker wallets |
+| `platform_authority` | `Pubkey` | Ops key (opens/stages/resolves; never holds fees) |
+| `fee_recipient` | `Pubkey` | Treasury, snapshotted from Config |
+| `token_mint` | `Pubkey` | SPL mint for the period |
+| `bump` / `vault_bump` | `u8` | Period PDA bump / reserved |
+| `weekly_cap_net` | `u64` | Max net worker pay for the week |
+| `commission_rate_bps` | `u16` | Commission rate (≤ 10%) |
+| `funded_amount` | `u64` | Tokens funded into the vault so far |
+| `released_net` | `u64` | Cumulative net paid to the worker |
+| `total_staged_net` | `u64` | Cumulative net staged across all tranches |
+| `tranches` | `[Tranche; 7]` | Fixed array of up to 7 tranches |
+| `tranche_count` | `u8` | Tranches staged (append‑only, ≤ 7) |
+| `review_window_secs` | `i64` | Per‑tranche review window (default 7d, max 30d) |
+| `created_at` / `funded_at` / `period_end_at` / `completed_at` | `i64` | Lifecycle timestamps |
+| `status` | `HourlyStatus` | `Open`/`Funded`/`Active`/`Settling`/`Closed`/`Refunded`/`Cancelled` |
+| `reserved` | `[u8; 64]` | Forward‑compat padding |
+
+Each **`Tranche`** carries: `amount` (net), `commission`, `staged_at`, `release_at`, `dispute_deadline`, and `status` (`Empty`/`Frozen`/`Disputed`/`Finalized`/`Resolved`). A tranche is *live* while `Frozen` or `Disputed`; those amounts are the vault's earmarked liabilities.
+
 ### Events
 
-`EscrowCreated`, `EscrowFunded`, `CompletionConfirmed`, `EscrowReleased` (carries `ref_id`, `is_partial`, `remaining_worker_amount`), `DisputeRaised`, `DisputeResolved` (carries `forced`), `EscrowCancelled`, `PlatformAuthorityRotated`, `DirectPaymentMade`, `ConfigUpdated`, `MintAllowlistChanged`, `EscrowToppedUp`, `BatchPaymentMade`, `EscrowSettled`.
+`EscrowCreated`, `EscrowFunded`, `CompletionConfirmed`, `EscrowReleased` (carries `ref_id`, `is_partial`, `remaining_worker_amount`), `DisputeRaised`, `DisputeResolved` (carries `forced`), `EscrowCancelled`, `PlatformAuthorityRotated`, `DirectPaymentMade`, `ConfigUpdated`, `MintAllowlistChanged`, `EscrowToppedUp`, `BatchPaymentMade`, `EscrowSettled`. The hourly engine adds `HourlyPeriodOpened`, `HourlyPeriodFunded`, `HourlyCapRaised`, `TrancheStaged`, `TrancheFinalized` (carries `forced`), `HourlyDisputeRaised`, `HourlyTrancheResolved` (carries `forced` + the treasury/refund split), `HourlyRemainderRefunded`, and `HourlyPeriodClosed`.
 
 Direct‑pay and batch‑pay persist no state — indexers rely entirely on `DirectPaymentMade` / `BatchPaymentMade`.
 
@@ -378,6 +464,19 @@ Direct‑pay and batch‑pay persist no state — indexers rely entirely on `Dir
 | 6043 | `RecipientCountMismatch` | Recipient count != `amounts` length |
 | 6044 | `EmptyBatch` | Batch must have at least one recipient |
 | 6045 | `TopUpNotFunded` | Top‑up requires the escrow to be `Funded` |
+| 6046 | `WeeklyCapExceeded` | Staged amount would exceed the weekly cap |
+| 6047 | `TrancheLimitReached` | Weekly tranche limit (7) reached |
+| 6048 | `TrancheNotFrozen` | Tranche is not in `Frozen` status |
+| 6049 | `TrancheNotDisputed` | Tranche is not in `Disputed` status |
+| 6050 | `TrancheWindowNotElapsed` | Tranche review window has not elapsed |
+| 6051 | `DisputeWindowClosed` | Cannot dispute after the tranche review window has opened |
+| 6052 | `InvalidTrancheIndex` | Tranche index out of bounds |
+| 6053 | `VaultUnderfunded` | Vault balance insufficient to back this earmark |
+| 6054 | `HourlyEmployeeShareExceedsTranche` | `employee_share` exceeds the tranche amount |
+| 6055 | `CapCannotDecrease` | Weekly cap can only be raised, never lowered |
+| 6056 | `CapBelowStaged` | Weekly cap cannot drop below the already‑staged total |
+| 6057 | `PeriodFullyFunded` | Period vault already funded to `cap_gross` |
+| 6058 | `HourlyPeriodNotTerminal` | Period has live earmarks; cannot close |
 
 ---
 
@@ -400,7 +499,7 @@ All SOL payout/refund/dispute/settle paths **drain the vault to its actual balan
 - **Upgrade authority.** On devnet a single file key (acceptable for devnet); **on mainnet the upgrade authority and Config authority must be a Squads multisig / HSM** (transfer post‑deploy with `solana program set-upgrade-authority`). Config admin uses a **two‑step handoff** so the keys can never be sent to a wrong address.
 - **Drain‑actual‑balance.** All SOL release/resolve/cancel/settle paths transfer the vault's *real* lamport balance, defeating dust‑deposit DoS that would otherwise strand a vault below the rent‑exempt minimum.
 - **Mint allowlist.** Only SOL plus an admin‑curated set of SPL mints are accepted. **Accepted‑stablecoin freeze risk:** USDC/USDT/EURC carry an issuer freeze authority; a frozen vault ATA or recipient ATA could block a transfer. The allowlist limits exposure to vetted issuers, and the deadline safety net plus close paths bound the blast radius.
-- **Minimum dispute window.** A mandatory 3‑day floor on `dispute_deadline` guarantees the platform always has time to mediate before anyone can permissionlessly force‑resolve — closing the self‑dispute‑then‑instant‑payout hole. The platform forfeits commission on any dispute, removing any incentive to stall.
+- **Minimum dispute window.** A mandatory 3‑day floor on `dispute_deadline` guarantees the platform always has time to mediate before anyone can permissionlessly force‑resolve — closing the self‑dispute‑then‑instant‑payout hole. What removes any incentive for the platform to stall is the permissionless auto‑release: after the deadline **anyone** can force‑resolve to the worker, so an unresponsive platform can never strand funds. (As of v1.1.0 the platform *retains* its commission — routed to the treasury — on a resolved or force‑resolved dispute, cancel, or mutual cancel; it is no longer refunded to the employer.)
 - **Pause that can't strand funds.** The kill‑switch only blocks new money; releases, disputes, auto‑release, settle, and close are always available.
 - **`security_txt`.** The program embeds a [`solana-security-txt`](https://github.com/neodyme-labs/solana-security-txt) block: contact `security@worqen.com`, policy and source on GitHub, **`auditors: "Pending external audit"`**.
 - **Forward compatibility.** Both accounts carry a `version` byte and 64‑byte `reserved` padding so additive fields can be introduced in a future upgrade without a realloc; `escrow_kind` is a `u8` (not a closed enum) so new product flows need no schema migration.
@@ -483,7 +582,7 @@ Three GitHub Actions workflows in `.github/workflows/`:
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| **`ci.yml`** | every push / PR to `main` | `cargo fmt --check`, `clippy -D warnings`, `anchor build`, and the **full per‑instruction LiteSVM suite via `bun test`** (in‑process, no validator). The merge gate. |
+| **`ci.yml`** | every push / PR to `master` | `cargo fmt --check`, `clippy -D warnings`, `anchor build`, and the **full per‑instruction LiteSVM suite via `bun test`** (in‑process, no validator). The merge gate. |
 | **`deploy.yml`** | manual (`workflow_dispatch`) | Builds, **upgrades the devnet program in place**, refreshes the on‑chain IDL, and re‑runs the LiteSVM suite on the built artifact. Gated by the `devnet` environment. |
 | **`release.yml`** | tag `v*` | **Reproducible `solana-verify` build**, publishes the `.so` + IDL + hashes as a **GitHub Release**, and (behind the protected `mainnet-beta` environment) writes a verified **buffer for the Squads multisig** to execute the mainnet upgrade. |
 
@@ -509,7 +608,7 @@ The employer. Commission is charged *on top of* the worker's pay, so the freelan
 The on‑chain program only enforces the 10% hard cap; the **effective bps is passed per call by the backend**. For a Prime employer the backend passes `150` instead of the standard `500`.
 
 **How is hourly / invoice billing done on‑chain?**
-Create with `escrow_kind = HOURLY` or `RETAINER`, top up with `deposit_more_*`, and pay out approved time in slices with `release_partial_*`. Each partial carries a `ref_id` linking it to the off‑chain worklog or invoice. For trusted relationships, `pay_with_commission_*` settles an approved invoice in one shot with no lock.
+Two ways. For ongoing hourly work, use the dedicated **weekly settlement (GWS) engine** — `open_period` → `fund_period` → `stage_tranche` → `finalize_tranche` — which pre-funds a capped weekly vault and freezes each approved block of hours for a review window before it auto-pays (see flow (j)). For lighter-weight or one-off billing, use the milestone `Escrow` with `escrow_kind = HOURLY`/`RETAINER`: top up with `deposit_more_*` and pay out approved time in slices with `release_partial_*`. Each partial carries a `ref_id` linking it to the off‑chain worklog or invoice. For trusted relationships, `pay_with_commission_*` settles an approved invoice in one shot with no lock.
 
 **Can a company (B2B) use it?**
 Yes. The `employer` is just a wallet — a company wallet works the same as an individual. The `terms_hash` field can anchor a signed SOW or contract for dispute evidence.
@@ -540,7 +639,7 @@ Native **SOL** (always) plus the **admin‑curated SPL allowlist** (up to 30 min
 Not yet — status is **pending external audit**. Do not put real funds on mainnet until the audit completes and authorities are multisig.
 
 **How do disputes work and what is the deadline?**
-Either party (employer‑only after a confirm) raises a dispute with a mandatory deadline in `[now + 3 days, now + 90 days]`, freezing funds. The platform resolves by splitting the remaining worker amount (commission is refunded to the employer). If the platform never acts, anyone can force‑resolve in the worker's favor after the deadline.
+Either party (employer‑only after a confirm) raises a dispute with a mandatory deadline in `[now + 3 days, now + 90 days]`, freezing funds. The platform resolves by splitting the remaining worker amount (the commission is retained by the treasury). If the platform never acts, anyone can force‑resolve in the worker's favor after the deadline.
 
 **Can the employer cancel after funding?**
 No. Once `Funded`, only the **platform** may cancel; the employer must raise a dispute instead. In the `Created` (pre‑deposit) state, the employer can cancel freely. Both parties can also `mutual_cancel_*` together at any non‑terminal stage.
