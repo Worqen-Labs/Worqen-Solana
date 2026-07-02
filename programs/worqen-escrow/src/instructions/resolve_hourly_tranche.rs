@@ -85,7 +85,8 @@ pub fn handler(ctx: Context<ResolveHourlyTranche>, index: u8, employee_share: u6
         EscrowError::HourlyEmployeeShareExceedsTranche
     );
 
-    let commission_on_share = Escrow::calculate_commission(employee_share, period.commission_rate_bps);
+    let commission_on_share =
+        Escrow::calculate_commission(employee_share, period.commission_rate_bps);
     let treasury_leg = commission_on_share.min(t.commission);
     let employer_worker_share = t
         .amount

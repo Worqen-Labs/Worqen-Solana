@@ -51,7 +51,8 @@ pub fn handler(ctx: Context<StageTranche>, amount: u64) -> Result<()> {
         EscrowError::WeeklyCapExceeded
     );
 
-    let cum_before = Escrow::calculate_commission(period.total_staged_net, period.commission_rate_bps);
+    let cum_before =
+        Escrow::calculate_commission(period.total_staged_net, period.commission_rate_bps);
     let cum_after = Escrow::calculate_commission(new_total, period.commission_rate_bps);
     let commission = cum_after.saturating_sub(cum_before);
 

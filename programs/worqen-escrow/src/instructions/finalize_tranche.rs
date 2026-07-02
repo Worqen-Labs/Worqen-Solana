@@ -63,7 +63,10 @@ pub fn handler(ctx: Context<FinalizeTranche>, index: u8) -> Result<()> {
         EscrowError::InvalidTrancheIndex
     );
     let t = period.tranches[idx];
-    require!(t.status == TrancheStatus::Frozen, EscrowError::TrancheNotFrozen);
+    require!(
+        t.status == TrancheStatus::Frozen,
+        EscrowError::TrancheNotFrozen
+    );
 
     let clock = Clock::get()?;
     require!(
