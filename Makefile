@@ -3,7 +3,7 @@
 
 PROGRAM_ID := 6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ
 DEVNET_WALLET := ~/.config/solana/devnet-escrow.json
-REPO_URL := https://github.com/Worqen-Labs/Worqen-Escrow
+REPO_URL := https://github.com/Worqen-Labs/Worqen-Solana
 
 .PHONY: build test fmt clippy lint deploy-devnet idl-devnet verify-devnet \
 	config-status pause unpause bootstrap-config clean
