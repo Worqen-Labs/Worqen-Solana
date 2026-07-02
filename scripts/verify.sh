@@ -17,12 +17,12 @@
 # USAGE
 #   ./scripts/verify.sh <cluster> <program_id> <repo_url>
 #   e.g. ./scripts/verify.sh devnet 6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ \
-#          https://github.com/Worqen-Labs/Worqen-Escrow
+#          https://github.com/Worqen-Labs/Worqen-Solana
 set -euo pipefail
 
 CLUSTER="${1:-devnet}"
 PROGRAM_ID="${2:-6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ}"
-REPO_URL="${3:-https://github.com/Worqen-Labs/Worqen-Escrow}"
+REPO_URL="${3:-https://github.com/Worqen-Labs/Worqen-Solana}"
 LIBRARY_NAME="worqen_escrow"
 
 command -v solana-verify >/dev/null 2>&1 || { echo "solana-verify not installed: cargo install solana-verify"; exit 1; }
