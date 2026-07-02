@@ -38,7 +38,10 @@ pub fn handler(
         EscrowError::InvalidTrancheIndex
     );
     let t = period.tranches[idx];
-    require!(t.status == TrancheStatus::Frozen, EscrowError::TrancheNotFrozen);
+    require!(
+        t.status == TrancheStatus::Frozen,
+        EscrowError::TrancheNotFrozen
+    );
     require!(now < t.release_at, EscrowError::DisputeWindowClosed);
 
     require!(dispute_deadline > 0, EscrowError::DisputeDeadlineRequired);

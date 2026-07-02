@@ -55,7 +55,8 @@ pub fn handler(ctx: Context<PullFundPeriod>) -> Result<()> {
         EscrowError::InvalidStatus
     );
 
-    let commission = Escrow::calculate_commission(period.weekly_cap_net, period.commission_rate_bps);
+    let commission =
+        Escrow::calculate_commission(period.weekly_cap_net, period.commission_rate_bps);
     let cap_gross = period
         .weekly_cap_net
         .checked_add(commission)

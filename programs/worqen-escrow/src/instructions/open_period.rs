@@ -98,7 +98,10 @@ pub fn handler(
     let employer_key = ctx.accounts.employer.key();
     let employee_key = ctx.accounts.employee.key();
     let platform_key = ctx.accounts.platform_authority.key();
-    require!(employer_key != employee_key, EscrowError::EmployeeIsEmployer);
+    require!(
+        employer_key != employee_key,
+        EscrowError::EmployeeIsEmployer
+    );
     require!(
         platform_key != employer_key && platform_key != employee_key,
         EscrowError::PlatformAuthorityConflict
