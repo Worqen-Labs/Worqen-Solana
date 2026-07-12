@@ -10,6 +10,7 @@ Escrow for the Worqen marketplace: fixed-price escrows (native SOL + SPL tokens:
 
 - `Anchor.toml` / `Makefile` / `scripts/` drive build + test; `tests/` is the TS test suite; `devnet-deployment.json` records the devnet deploy.
 - Frontend consumes this program via `frontend/apps/dashboard/lib/solana-wallet/` (IDL copy at `lib/solana-wallet/idl/worqen_escrow.ts` — regenerate/copy after program changes or the frontend types lie).
+- The frontend `@solana/kit` client at `frontend/apps/dashboard/lib/solana-wallet/generated/` is codama-generated from `target/idl/worqen_escrow.json` — rerun `bun run generate:client` after every program change.
 - Backend submits/verifies via its Solana service layer; escrow state transitions must stay in sync with `backend` enums.
 - The generic `/solana-dev` skill covers Anchor/testing patterns; `SECURITY.md` lists program-specific invariants.
 - Lint gate: this repo is prettier-formatted (the workspace Stop hook runs `prettier --check` on touched TS here, not biome).
