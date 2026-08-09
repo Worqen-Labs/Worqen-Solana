@@ -25,6 +25,7 @@ pub struct RaiseWeeklyCap<'info> {
 pub fn handler(ctx: Context<RaiseWeeklyCap>, new_weekly_cap_net: u64) -> Result<()> {
     require!(!ctx.accounts.config.paused, EscrowError::ProgramPaused);
 
+    let now = Clock::get()?.unix_timestamp;
     let period = &mut ctx.accounts.hourly_period;
     require!(
         matches!(
@@ -33,6 +34,7 @@ pub fn handler(ctx: Context<RaiseWeeklyCap>, new_weekly_cap_net: u64) -> Result<
         ),
         EscrowError::InvalidStatus
     );
+    require!(now < period.period_end_at, EscrowError::PeriodEnded);
     require!(
         new_weekly_cap_net >= period.weekly_cap_net,
         EscrowError::CapCannotDecrease

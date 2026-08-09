@@ -50,7 +50,8 @@ pub fn init_config(
     config.paused = false;
     config.allowed_mints = allowed_mints;
     config.bump = ctx.bumps.config;
-    config.reserved = [0u8; 64];
+    config.platform_authority = Pubkey::default();
+    config.reserved = [0u8; 32];
 
     emit!(ConfigUpdated {
         authority: config.authority,
@@ -84,6 +85,7 @@ pub fn update_config(
     new_default_commission_bps: Option<u16>,
     new_paused: Option<bool>,
     new_pending_authority: Option<Pubkey>,
+    new_platform_authority: Option<Pubkey>,
 ) -> Result<()> {
     let config = &mut ctx.accounts.config;
 
@@ -103,6 +105,9 @@ pub fn update_config(
     }
     if let Some(pa) = new_pending_authority {
         config.pending_authority = pa;
+    }
+    if let Some(pa) = new_platform_authority {
+        config.platform_authority = pa;
     }
 
     emit!(ConfigUpdated {

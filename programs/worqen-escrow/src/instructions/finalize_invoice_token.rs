@@ -1,18 +1,26 @@
 use crate::errors::EscrowError;
-use crate::events::HourlyTrancheResolved;
+use crate::events::HourlyInvoiceFinalized;
 use crate::state::*;
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 #[derive(Accounts)]
-pub struct TriggerHourlyAutoRelease<'info> {
+pub struct FinalizeInvoiceToken<'info> {
     #[account(
         mut,
         seeds = [HourlyPeriod::HOURLY_SEED, hourly_period.hire_id.as_ref(), &hourly_period.period_index.to_le_bytes()],
         bump = hourly_period.bump,
+        constraint = !hourly_period.is_native @ EscrowError::NotTokenEscrow,
     )]
     pub hourly_period: Box<Account<'info, HourlyPeriod>>,
+
+    #[account(
+        mut,
+        close = rent_payer,
+        constraint = invoice.period == hourly_period.key() @ EscrowError::InvoicePeriodMismatch,
+    )]
+    pub invoice: Box<Account<'info, HourlyInvoice>>,
 
     #[account(constraint = token_mint.key() == hourly_period.token_mint @ EscrowError::InvalidTokenMint)]
     pub token_mint: Box<Account<'info, Mint>>,
@@ -41,11 +49,19 @@ pub struct TriggerHourlyAutoRelease<'info> {
     pub fee_recipient: UncheckedAccount<'info>,
 
     #[account(
-        mut,
-        constraint = platform_token_account.owner == hourly_period.fee_recipient @ EscrowError::Unauthorized,
-        constraint = platform_token_account.mint == hourly_period.token_mint @ EscrowError::InvalidTokenMint,
+        init_if_needed,
+        payer = caller,
+        associated_token::mint = token_mint,
+        associated_token::authority = fee_recipient,
     )]
     pub platform_token_account: Box<Account<'info, TokenAccount>>,
+
+    /// CHECK: matched against invoice.rent_payer; receives invoice rent
+    #[account(
+        mut,
+        constraint = rent_payer.key() == invoice.rent_payer @ EscrowError::Unauthorized,
+    )]
+    pub rent_payer: UncheckedAccount<'info>,
 
     #[account(mut)]
     pub caller: Signer<'info>,
@@ -55,28 +71,26 @@ pub struct TriggerHourlyAutoRelease<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn handler(ctx: Context<TriggerHourlyAutoRelease>, index: u8) -> Result<()> {
-    let idx = index as usize;
+pub fn handler(ctx: Context<FinalizeInvoiceToken>) -> Result<()> {
+    let invoice = &ctx.accounts.invoice;
+    require!(
+        invoice.status == InvoiceStatus::Staged,
+        EscrowError::InvoiceNotStaged
+    );
     let clock = Clock::get()?;
-    let now = clock.unix_timestamp;
-    let period = &mut ctx.accounts.hourly_period;
     require!(
-        idx < period.tranche_count as usize,
-        EscrowError::InvalidTrancheIndex
-    );
-    let t = period.tranches[idx];
-    require!(
-        t.status == TrancheStatus::Disputed,
-        EscrowError::TrancheNotDisputed
-    );
-    require!(
-        t.dispute_deadline != 0 && now >= t.dispute_deadline,
-        EscrowError::DisputeDeadlineNotReached
+        clock.unix_timestamp >= invoice.release_at,
+        EscrowError::InvoiceWindowNotElapsed
     );
 
-    let hire_id = period.hire_id;
-    let bump = period.bump;
-    let idx_le = period.period_index.to_le_bytes();
+    let amount_net = invoice.amount_net;
+    let commission = invoice.commission;
+    let invoice_index = invoice.invoice_index;
+    let ref_id = invoice.ref_id;
+
+    let hire_id = ctx.accounts.hourly_period.hire_id;
+    let bump = ctx.accounts.hourly_period.bump;
+    let idx_le = ctx.accounts.hourly_period.period_index.to_le_bytes();
     let period_seeds = &[
         HourlyPeriod::HOURLY_SEED,
         hire_id.as_ref(),
@@ -85,50 +99,51 @@ pub fn handler(ctx: Context<TriggerHourlyAutoRelease>, index: u8) -> Result<()> 
     ];
     let signer_seeds = &[&period_seeds[..]];
 
-    if t.amount > 0 {
+    if amount_net > 0 {
         token::transfer(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.employee_token_account.to_account_info(),
-                    authority: period.to_account_info(),
+                    authority: ctx.accounts.hourly_period.to_account_info(),
                 },
                 signer_seeds,
             ),
-            t.amount,
+            amount_net,
         )?;
     }
-    if t.commission > 0 {
+    if commission > 0 {
         token::transfer(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.platform_token_account.to_account_info(),
-                    authority: period.to_account_info(),
+                    authority: ctx.accounts.hourly_period.to_account_info(),
                 },
                 signer_seeds,
             ),
-            t.commission,
+            commission,
         )?;
     }
 
-    period.tranches[idx].status = TrancheStatus::Resolved;
-    period.released_net = period
-        .released_net
-        .checked_add(t.amount)
+    let period = &mut ctx.accounts.hourly_period;
+    period
+        .register_settled_invoice(amount_net, commission, amount_net)
         .ok_or(EscrowError::InvalidAmount)?;
 
-    emit!(HourlyTrancheResolved {
+    emit!(HourlyInvoiceFinalized {
         hire_id: period.hire_id,
         period_index: period.period_index,
-        tranche_index: index,
-        employee_share: t.amount,
-        employer_share: 0,
-        commission_to_treasury: t.commission,
-        commission_refunded: 0,
-        forced: true,
+        invoice_index,
+        ref_id,
+        recipient: period.employee,
+        amount_net,
+        commission,
+        commission_recipient: period.fee_recipient,
+        forced: false,
+        is_native: false,
         token_mint: period.token_mint,
     });
 

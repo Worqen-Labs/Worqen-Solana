@@ -6,10 +6,10 @@ resolution = true
 skip-lint = false
 
 [programs.devnet]
-worqen_escrow = "6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ"
+worqen_escrow = "FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh"
 
 [programs.localnet]
-worqen_escrow = "6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ"
+worqen_escrow = "FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh"
 
 # Mainnet program id — used only by `--features mainnet` builds (see src/lib.rs).
 [programs.mainnet]

@@ -151,29 +151,23 @@ pub enum EscrowError {
     #[msg("Staged amount would exceed the weekly cap")]
     WeeklyCapExceeded,
 
-    #[msg("Weekly tranche limit (7) reached")]
-    TrancheLimitReached,
+    #[msg("Invoice is not in Staged status")]
+    InvoiceNotStaged,
 
-    #[msg("Tranche is not in Frozen status")]
-    TrancheNotFrozen,
+    #[msg("Invoice is not in Disputed status")]
+    InvoiceNotDisputed,
 
-    #[msg("Tranche is not in Disputed status")]
-    TrancheNotDisputed,
+    #[msg("Invoice review window has not elapsed")]
+    InvoiceWindowNotElapsed,
 
-    #[msg("Tranche review window has not elapsed")]
-    TrancheWindowNotElapsed,
-
-    #[msg("Cannot dispute after the tranche review window has opened")]
+    #[msg("Cannot dispute after the invoice release time")]
     DisputeWindowClosed,
-
-    #[msg("Tranche index out of bounds")]
-    InvalidTrancheIndex,
 
     #[msg("Vault balance insufficient to back this earmark")]
     VaultUnderfunded,
 
-    #[msg("employee_share exceeds the tranche amount")]
-    HourlyEmployeeShareExceedsTranche,
+    #[msg("employee_share exceeds the invoice amount")]
+    EmployeeShareExceedsInvoice,
 
     #[msg("Weekly cap can only be raised, never lowered")]
     CapCannotDecrease,
@@ -184,6 +178,39 @@ pub enum EscrowError {
     #[msg("Period vault already funded to the current cap_gross")]
     PeriodFullyFunded,
 
-    #[msg("Period has live earmarks; cannot close")]
-    HourlyPeriodNotTerminal,
+    #[msg("Period window has already ended")]
+    PeriodEnded,
+
+    #[msg("Period window has not started yet")]
+    PeriodNotStarted,
+
+    #[msg("Period window has not ended yet")]
+    PeriodNotEnded,
+
+    #[msg("Period is already settled")]
+    PeriodAlreadySettled,
+
+    #[msg("Period must be settled before closing")]
+    PeriodNotSettled,
+
+    #[msg("Period still has live invoices")]
+    LiveInvoicesOutstanding,
+
+    #[msg("Invalid period start/duration window")]
+    InvalidPeriodWindow,
+
+    #[msg("Invoice index overflow")]
+    InvoiceIndexOverflow,
+
+    #[msg("Invoice does not belong to this period")]
+    InvoicePeriodMismatch,
+
+    #[msg("Period platform_authority is unset or does not match Config")]
+    InvalidPlatformAuthority,
+
+    #[msg("Funding amount exceeds the caller-supplied maximum")]
+    FundExceedsMax,
+
+    #[msg("Payout would leave the SOL vault below the rent-exempt minimum")]
+    VaultLeavesDust,
 }

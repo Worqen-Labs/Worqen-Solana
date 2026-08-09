@@ -1,35 +1,35 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Worqen Escrow \u2014 devnet deployment manifest. Canonical source for the program ID, upgrade authority, Config PDA, and keypair paths used by CI/deploy scripts and off-chain services. worqen-escrow v1.0.0.",
+  "description": "Worqen Escrow \u2014 devnet deployment manifest. Canonical source for the program ID, upgrade authority, Config PDA, and keypair paths used by CI/deploy scripts and off-chain services. worqen-escrow v1.2.0 (Hourly v2).",
   "network": "devnet",
   "cluster_rpc": "https://api.devnet.solana.com",
   "explorer": {
-    "program": "https://explorer.solana.com/address/6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ?cluster=devnet",
-    "solscan": "https://solscan.io/account/6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ?cluster=devnet"
+    "program": "https://explorer.solana.com/address/FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh?cluster=devnet",
+    "solscan": "https://solscan.io/account/FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh?cluster=devnet"
   },
   "program": {
-    "id": "6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ",
+    "id": "FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh",
     "name": "worqen-escrow",
-    "account_schema_version": 1,
-    "program_version": "v1.0.0",
+    "account_schema_version": 2,
+    "program_version": "v1.2.0",
     "anchor_version": "0.32.1",
-    "keypair_path": "target/deploy/worqen_escrow-keypair.json",
+    "keypair_path": "~/.config/solana/worqen-escrow-v2-program.json",
     "so_path": "target/deploy/worqen_escrow.so",
-    "data_length_bytes": 698272,
-    "programdata_address": "8nty8pKT9Pjnubi2kyXPte7SpiEpRG4FYQpn6AwYuNgQ",
+    "data_length_bytes": 1023952,
+    "programdata_address": "5dGNYXHqDNk83Hch1MUPKGx3CviFcWX5cPKQFHFiZQcw",
     "bpf_loader": "BPFLoaderUpgradeab1e11111111111111111111111"
   },
   "upgrade_authority": {
-    "pubkey": "14AZtBTAyX9E9GsYryS5BEUT62mDeSDiwHkoKs9rEaSk",
+    "pubkey": "Gg5L88vFoL32Dw64qXX4SirD8SHPfCjJEqm3Qrjjh6zz",
     "keypair_path": "~/.config/solana/devnet-escrow.json",
-    "notes": "Devnet deployer + upgrade authority (single key \u2014 fine for devnet). MAINNET MUST use a Squads multisig / HSM, never a file key. Transfer post-deploy with `solana program set-upgrade-authority`."
+    "notes": "v2 deployer + upgrade authority (fresh key; original 6Ftag authority 14AZ was lost with the macOS checkout). MAINNET: Squads multisig."
   },
   "config": {
-    "pda": "FoZkFXVjLSgeLDcZ98cahFSMUVTt7NfBDprKvpvtTTvN",
+    "pda": "FmxSRZbdgqnA5ufZ3DP2t8swyMPn6pLboFa6JxHLC9aL",
     "seeds": [
       "config"
     ],
-    "authority": "14AZtBTAyX9E9GsYryS5BEUT62mDeSDiwHkoKs9rEaSk",
+    "authority": "MPq6BwTsfBNmA7DwdaRGLeX8Bg67Kj5sFwsiYDexste",
     "fee_recipient": "49gGSC3hGZ2KFX4rFou9PJqjMchKQGNBpFQzpYhaNan1",
     "fee_recipient_note": "Dedicated devnet treasury (keypair at ~/.config/solana/worqen-treasury.json, recoverable). Set via update_config. On MAINNET use a dedicated cold/receive-only or multisig wallet.",
     "default_commission_bps": 500,
@@ -38,7 +38,9 @@
       "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
       "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr"
     ],
-    "allowed_mints_note": "USDC (4zMMC9...) and EURC (HzwqbKZw8...) devnet mints, set via scripts/bootstrap-config.ts. SOL is always allowed. USDT has no devnet mint (alias to USDC on devnet)."
+    "allowed_mints_note": "USDC (4zMMC9...) and EURC (HzwqbKZw8...) devnet mints, set via scripts/bootstrap-config.ts. SOL is always allowed. USDT has no devnet mint (alias to USDC on devnet).",
+    "platform_authority": "64PF1jbXinCFteyegYpkPJ25fHKibPeVGJsjmc4AH46H",
+    "platform_authority_note": "Backend ESCROW_WALLET; pinned in Config so open_period cannot name a hostile arbitrator (v2 security fix). Set via update_config."
   },
   "idl": {
     "source_of_truth": "target/idl/worqen_escrow.json",
@@ -58,7 +60,7 @@
       "min": 259200,
       "max": 7776000
     },
-    "instruction_count": 33,
+    "instruction_count": 50,
     "key_roles": {
       "upgrade_authority": "deploy new bytecode (mainnet: multisig)",
       "config_authority": "Config.authority \u2014 pause, allowlist, default fee, treasury (mainnet: multisig; two-step handoff via update_config+accept_authority)",
@@ -67,6 +69,19 @@
     }
   },
   "deployment_history": [
+    {
+      "version": "v1.2.0",
+      "deployed_slot": 482114923,
+      "deploy_tx": "5a2PBJLTW7wosVvQfsYn9Gx6dBwE8xJ3veVydasNSXbpmV5xcGWetKVs4LGqLVZ71QRjMhtgzBTBDH51evmEHCT3",
+      "deployed_at": "2026-08-08",
+      "notes": [
+        "Hourly v2: per-invoice HourlyInvoice PDAs replace the fixed [Tranche;7] array (unlimited invoices/week); money-cap HourlyPeriod v2 with hire-anchored week window (period_start_at/period_end_at); native SOL + SPL _sol/_token instruction pairs; permissionless finalize/settle/close; 50 instructions.",
+        "NEW PROGRAM ID FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh (could not upgrade 6Ftag in place \u2014 original upgrade authority key was lost with the macOS checkout).",
+        "Security fixes (adversarial review): (1) Config.platform_authority pins the named platform on open_period (was vacuously authorized \u2014 squat/hostile-arbitrator DoS); (2) fund_period_sol/token gained max_fund_amount to block a raise_weekly_cap front-run; (3) native SOL vault_rent_reserve seeded on first fund so partial payouts never strand the vault below the rent-exempt minimum.",
+        "Verified: 74/74 LiteSVM tests + full backend-builder integration E2E on a live validator (identical bytecode).",
+        "ACCOUNT SCHEMA v2 \u2014 old 6Ftag hourly accounts are incompatible; this is a fresh program, no migration."
+      ]
+    },
     {
       "version": "v1.0.0",
       "deployed_slot": 465737474,
@@ -103,10 +118,9 @@
     "eurc_mint_devnet": "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr"
   },
   "post_deploy_checklist": [
-    "Set ESCROW_PROGRAM_ID=6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ in backend .env / CI variables.",
-    "Set NEXT_PUBLIC_ESCROW_PROGRAM_ID=6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ in frontend .env; copy target/idl/worqen_escrow.json to the frontend.",
-    "Backend: add the Config PDA account to every create_escrow / pay_with_commission_* call; pass the new escrow_kind + terms_hash on create and ref_id on release/direct-pay; route commission expectations to fee_recipient.",
-    "Run update_config to set a real treasury fee_recipient, and add_allowed_mint for the stablecoin mints, before functional use.",
-    "MAINNET: fresh secure program keypair, declare_id + Anchor.toml updated, verified build (solana-verify), deploy with a Squads multisig as upgrade + config authority."
+    "Set ESCROW_PROGRAM_ID=FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh in backend .env / CI (done in local .env; update the dev server too).",
+    "Set NEXT_PUBLIC_ESCROW_PROGRAM_ID=FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh in frontend .env; codama client regenerated.",
+    "init_config + update_config(platform_authority=ESCROW_WALLET) already run on devnet (config PDA FmxSRZbd...).",
+    "Fund QA wallets on devnet before testing (deployer cannot auto-fill)."
   ]
 }

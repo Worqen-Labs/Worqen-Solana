@@ -3,7 +3,6 @@ import * as anchor from "@coral-xyz/anchor";
 import {
   AccountLayout,
   ASSOCIATED_TOKEN_PROGRAM_ID,
-  createApproveInstruction,
   createAssociatedTokenAccountInstruction,
   createInitializeMint2Instruction,
   createMintToInstruction,
@@ -32,15 +31,18 @@ const SO_PATH = "target/deploy/worqen_escrow.so";
 
 const seed = (s: string) => Buffer.from(s);
 const rand32 = () => Array.from(Keypair.generate().publicKey.toBytes());
-const BPS = 500;
+
 const DAY = 24 * 3600;
 const BASE_TS = 1_900_000_000;
-
+const BPS = 500;
+const REVIEW = 7 * DAY;
+const DURATION = 7 * DAY;
 const CAP = new BN(1_000_000);
-const CAP_COMMISSION = CAP.muln(BPS).divn(10000);
-const CAP_GROSS = CAP.add(CAP_COMMISSION);
-const REVIEW = new BN(7 * DAY);
-const commission = (amt: BN) => amt.muln(BPS).divn(10000);
+const MINTED = 1_000_000_000_000;
+
+const commission = (amt: BN, bps = BPS) => amt.muln(bps).divn(10000);
+const grossOf = (net: BN, bps = BPS) => net.add(commission(net, bps));
+const n = (v: any) => Number(v.toString());
 
 let svm: LiteSvm;
 let program: anchor.Program;
@@ -48,9 +50,9 @@ let payer: Keypair;
 let configPda: PublicKey;
 let treasury: Keypair;
 let mint: PublicKey;
-let payerAta: PublicKey;
 let treasuryAta: PublicKey;
-let delegateAuth: PublicKey;
+let platform: Keypair;
+let RENT_RESERVE: bigint;
 
 function buildTx(
   ixs: TransactionInstruction[],
@@ -85,8 +87,22 @@ function expectFail(
   }
 }
 
+function accountOf(pk: PublicKey): any {
+  return svm.getAccount(pk.toBytes());
+}
+
+function exists(pk: PublicKey): boolean {
+  const acc = accountOf(pk);
+  return acc !== null && acc.lamports() > 0n;
+}
+
+function lamports(pk: PublicKey): bigint {
+  const acc = accountOf(pk);
+  return acc === null ? 0n : acc.lamports();
+}
+
 function tokenBalance(ata: PublicKey): bigint {
-  const acc = svm.getAccount(ata.toBytes());
+  const acc = accountOf(ata);
   if (acc === null) return 0n;
   return BigInt(
     AccountLayout.decode(Buffer.from(acc.data())).amount.toString(),
@@ -97,7 +113,7 @@ function now(): number {
   return Number(svm.getClock().unixTimestamp);
 }
 
-function warpBy(seconds: number) {
+function warpTo(ts: number) {
   const c = svm.getClock();
   svm.setClock(
     new Clock(
@@ -105,220 +121,529 @@ function warpBy(seconds: number) {
       c.epochStartTimestamp,
       c.epoch,
       c.leaderScheduleEpoch,
-      c.unixTimestamp + BigInt(seconds),
+      BigInt(ts),
     ),
   );
 }
 
-function fundedKeypair(sol = 10): Keypair {
+function warpBy(seconds: number) {
+  warpTo(now() + seconds);
+}
+
+function fundedKeypair(sol = 50): Keypair {
   const kp = Keypair.generate();
   svm.airdrop(kp.publicKey.toBytes(), BigInt(sol * LAMPORTS_PER_SOL));
   return kp;
 }
 
-function periodPdas(hireId: number[], periodIndex: number) {
-  const idx = Buffer.alloc(4);
-  idx.writeUInt32LE(periodIndex);
-  const [period] = PublicKey.findProgramAddressSync(
-    [seed("hourly"), Buffer.from(hireId), idx],
-    PROGRAM_ID,
-  );
-  const vault = getAssociatedTokenAddressSync(mint, period, true);
-  return { period, vault };
+function mintTo(owner: PublicKey, amount = MINTED): PublicKey {
+  const ata = getAssociatedTokenAddressSync(mint, owner);
+  send([
+    createAssociatedTokenAccountInstruction(payer.publicKey, ata, owner, mint),
+    createMintToInstruction(mint, ata, payer.publicKey, amount),
+  ]);
+  return ata;
 }
 
-function decodeHourly(period: PublicKey): any {
-  const acc = svm.getAccount(period.toBytes());
-  if (acc === null) throw new Error("hourly period account not found");
+function periodPda(hireId: number[], periodIndex: number): PublicKey {
+  const idx = Buffer.alloc(4);
+  idx.writeUInt32LE(periodIndex);
+  return PublicKey.findProgramAddressSync(
+    [seed("hourly"), Buffer.from(hireId), idx],
+    PROGRAM_ID,
+  )[0];
+}
+
+function solVaultPda(period: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [seed("vault"), period.toBuffer()],
+    PROGRAM_ID,
+  )[0];
+}
+
+function invoicePda(period: PublicKey, index: number): PublicKey {
+  const idx = Buffer.alloc(2);
+  idx.writeUInt16LE(index);
+  return PublicKey.findProgramAddressSync(
+    [seed("hourly_inv"), period.toBuffer(), idx],
+    PROGRAM_ID,
+  )[0];
+}
+
+function decodeConfig(): any {
+  const acc = accountOf(configPda);
+  if (acc === null) throw new Error("config account not found");
+  return program.coder.accounts.decode("config", Buffer.from(acc.data()));
+}
+
+function decodePeriod(period: PublicKey): any {
+  const acc = accountOf(period);
+  if (acc === null) throw new Error("period account not found");
   return program.coder.accounts.decode("hourlyPeriod", Buffer.from(acc.data()));
 }
 
-function trancheStatus(t: any): string {
-  return Object.keys(t.status)[0];
+function decodeInvoice(invoice: PublicKey): any {
+  const acc = accountOf(invoice);
+  if (acc === null) throw new Error("invoice account not found");
+  return program.coder.accounts.decode(
+    "hourlyInvoice",
+    Buffer.from(acc.data()),
+  );
 }
 
-function newHourly(periodIndex = 0) {
-  const hireId = rand32();
-  const { period, vault } = periodPdas(hireId, periodIndex);
-  const employee = Keypair.generate();
-  const platformAuthority = fundedKeypair();
+function statusOf(v: any): string {
+  return Object.keys(v)[0];
+}
+
+type Parties = {
+  employer: Keypair;
+  employerAta: PublicKey;
+  employee: Keypair;
+  employeeAta: PublicKey;
+  platform: Keypair;
+};
+
+function newParties(): Parties {
+  const employer = fundedKeypair(500);
+  const employee = fundedKeypair(10);
+  const employerAta = mintTo(employer.publicKey);
   const employeeAta = getAssociatedTokenAddressSync(mint, employee.publicKey);
+  return { employer, employerAta, employee, employeeAta, platform };
+}
+
+type Ctx = Parties & {
+  hireId: number[];
+  periodIndex: number;
+  period: PublicKey;
+  vault: PublicKey;
+  isNative: boolean;
+  capNet: BN;
+  bps: number;
+  review: number;
+  duration: number;
+  startAt: number;
+  endAt: number;
+  rentPayer: Keypair;
+};
+
+function newCtx(
+  o: {
+    isNative?: boolean;
+    capNet?: BN;
+    bps?: number;
+    review?: number;
+    duration?: number;
+    startOffset?: number;
+    parties?: Parties;
+    periodIndex?: number;
+  } = {},
+): Ctx {
+  const parties = o.parties ?? newParties();
+  const hireId = rand32();
+  const periodIndex = o.periodIndex ?? 0;
+  const period = periodPda(hireId, periodIndex);
+  const isNative = o.isNative ?? false;
+  const vault = isNative
+    ? solVaultPda(period)
+    : getAssociatedTokenAddressSync(mint, period, true);
+  const startAt = now() + (o.startOffset ?? 0);
+  const duration = o.duration ?? DURATION;
   return {
+    ...parties,
     hireId,
     periodIndex,
     period,
     vault,
-    employee,
-    platformAuthority,
-    employeeAta,
+    isNative,
+    capNet: o.capNet ?? CAP,
+    bps: o.bps ?? BPS,
+    review: o.review ?? REVIEW,
+    duration,
+    startAt,
+    endAt: startAt + duration,
+    rentPayer: parties.employer,
   };
 }
 
-type Ctx = ReturnType<typeof newHourly>;
+function capGross(ctx: Ctx): BN {
+  return grossOf(ctx.capNet, ctx.bps);
+}
 
-async function openPeriod(ctx: Ctx, cap = CAP, review = REVIEW) {
-  const ix = await program.methods
-    .openPeriod(ctx.hireId, ctx.periodIndex, cap, BPS, review)
+async function openIx(
+  ctx: Ctx,
+  o: {
+    authorizer?: Keypair;
+    employer?: PublicKey;
+    employee?: PublicKey;
+    platform?: PublicKey;
+    feeRecipient?: PublicKey;
+    tokenMint?: PublicKey;
+    isNative?: boolean;
+    capNet?: BN;
+    bps?: number;
+    review?: number;
+    startAt?: number;
+    duration?: number;
+  } = {},
+): Promise<TransactionInstruction> {
+  const isNative = o.isNative ?? ctx.isNative;
+  return program.methods
+    .openPeriod(
+      ctx.hireId,
+      ctx.periodIndex,
+      o.capNet ?? ctx.capNet,
+      o.bps ?? ctx.bps,
+      new BN(o.review ?? ctx.review),
+      new BN(o.startAt ?? ctx.startAt),
+      new BN(o.duration ?? ctx.duration),
+      isNative,
+    )
     .accountsPartial({
       config: configPda,
       hourlyPeriod: ctx.period,
-      employer: payer.publicKey,
-      employee: ctx.employee.publicKey,
-      platformAuthority: ctx.platformAuthority.publicKey,
-      feeRecipient: treasury.publicKey,
-      tokenMint: mint,
-      vaultTokenAccount: ctx.vault,
-      employeeTokenAccount: ctx.employeeAta,
-      platformTokenAccount: treasuryAta,
-      payer: payer.publicKey,
-      tokenProgram: TOKEN_PROGRAM_ID,
-      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+      employer: o.employer ?? ctx.employer.publicKey,
+      employee: o.employee ?? ctx.employee.publicKey,
+      platformAuthority: o.platform ?? ctx.platform.publicKey,
+      feeRecipient: o.feeRecipient ?? treasury.publicKey,
+      tokenMint:
+        o.tokenMint ?? (isNative ? SystemProgram.programId : (mint as any)),
+      authorizer: (o.authorizer ?? ctx.employer).publicKey,
       systemProgram: SystemProgram.programId,
     })
     .instruction();
-  send([ix]);
 }
 
-async function fundPeriod(ctx: Ctx) {
-  const ix = await program.methods
-    .fundPeriod()
+async function open(ctx: Ctx, authorizer?: Keypair) {
+  const signer = authorizer ?? ctx.employer;
+  send([await openIx(ctx, { authorizer: signer })], [signer]);
+  ctx.rentPayer = signer;
+}
+
+function onchainCapGross(ctx: Ctx): BN {
+  const p = decodePeriod(ctx.period);
+  return grossOf(p.weeklyCapNet, p.commissionRateBps);
+}
+
+async function fundIx(ctx: Ctx, maxFund?: BN): Promise<TransactionInstruction> {
+  const bound = maxFund ?? onchainCapGross(ctx);
+  if (ctx.isNative) {
+    return program.methods
+      .fundPeriodSol(bound)
+      .accountsPartial({
+        config: configPda,
+        hourlyPeriod: ctx.period,
+        escrowVault: ctx.vault,
+        employer: ctx.employer.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+  }
+  return program.methods
+    .fundPeriodToken(bound)
     .accountsPartial({
       config: configPda,
       hourlyPeriod: ctx.period,
-      vaultTokenAccount: ctx.vault,
-      employer: payer.publicKey,
-      employerTokenAccount: payerAta,
       tokenMint: mint,
+      vaultTokenAccount: ctx.vault,
+      employer: ctx.employer.publicKey,
+      employerTokenAccount: ctx.employerAta,
       tokenProgram: TOKEN_PROGRAM_ID,
+      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
     })
     .instruction();
-  send([ix]);
 }
 
-async function pullFundPeriod(ctx: Ctx) {
-  const ix = await program.methods
-    .pullFundPeriod()
+async function fund(ctx: Ctx, maxFund?: BN) {
+  send([await fundIx(ctx, maxFund)], [ctx.employer]);
+}
+
+async function raiseCapIx(
+  ctx: Ctx,
+  newCap: BN,
+  authority?: Keypair,
+): Promise<TransactionInstruction> {
+  return program.methods
+    .raiseWeeklyCap(newCap)
     .accountsPartial({
       config: configPda,
       hourlyPeriod: ctx.period,
-      vaultTokenAccount: ctx.vault,
-      employerTokenAccount: payerAta,
-      delegateAuthority: delegateAuth,
+      authority: (authority ?? ctx.employer).publicKey,
+    })
+    .instruction();
+}
+
+function nextInvoiceIndex(ctx: Ctx): number {
+  return decodePeriod(ctx.period).invoiceCount;
+}
+
+async function stageIx(
+  ctx: Ctx,
+  amount: BN,
+  o: { index?: number; signer?: Keypair; refId?: number[] } = {},
+): Promise<TransactionInstruction> {
+  const index = o.index ?? nextInvoiceIndex(ctx);
+  const signer = o.signer ?? ctx.platform;
+  const invoice = invoicePda(ctx.period, index);
+  const common = {
+    config: configPda,
+    hourlyPeriod: ctx.period,
+    invoice,
+    platformAuthority: signer.publicKey,
+    systemProgram: SystemProgram.programId,
+  };
+  if (ctx.isNative) {
+    return program.methods
+      .stageInvoiceSol(amount, o.refId ?? rand32())
+      .accountsPartial({ ...common, escrowVault: ctx.vault })
+      .instruction();
+  }
+  return program.methods
+    .stageInvoiceToken(amount, o.refId ?? rand32())
+    .accountsPartial({ ...common, vaultTokenAccount: ctx.vault })
+    .instruction();
+}
+
+async function stage(ctx: Ctx, amount: BN): Promise<number> {
+  const index = nextInvoiceIndex(ctx);
+  send([await stageIx(ctx, amount, { index })], [ctx.platform]);
+  return index;
+}
+
+async function disputeIx(
+  ctx: Ctx,
+  index: number,
+  deadline: number,
+  signer: Keypair,
+): Promise<TransactionInstruction> {
+  return program.methods
+    .raiseInvoiceDispute(new BN(deadline), Buffer.from("bad work"))
+    .accountsPartial({
+      hourlyPeriod: ctx.period,
+      invoice: invoicePda(ctx.period, index),
+      signer: signer.publicKey,
+    })
+    .instruction();
+}
+
+async function finalizeIx(
+  ctx: Ctx,
+  index: number,
+  o: { caller?: Keypair; period?: PublicKey; vault?: PublicKey } = {},
+): Promise<TransactionInstruction> {
+  const caller = o.caller ?? ctx.platform;
+  const period = o.period ?? ctx.period;
+  const vault = o.vault ?? ctx.vault;
+  if (ctx.isNative) {
+    return program.methods
+      .finalizeInvoiceSol()
+      .accountsPartial({
+        hourlyPeriod: period,
+        invoice: invoicePda(ctx.period, index),
+        escrowVault: vault,
+        employee: ctx.employee.publicKey,
+        feeRecipient: treasury.publicKey,
+        rentPayer: ctx.platform.publicKey,
+        caller: caller.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+  }
+  return program.methods
+    .finalizeInvoiceToken()
+    .accountsPartial({
+      hourlyPeriod: period,
+      invoice: invoicePda(ctx.period, index),
       tokenMint: mint,
-      caller: payer.publicKey,
+      vaultTokenAccount: vault,
+      employee: ctx.employee.publicKey,
+      employeeTokenAccount: ctx.employeeAta,
+      feeRecipient: treasury.publicKey,
+      platformTokenAccount: treasuryAta,
+      rentPayer: ctx.platform.publicKey,
+      caller: caller.publicKey,
       tokenProgram: TOKEN_PROGRAM_ID,
+      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
     })
     .instruction();
-  send([ix]);
 }
 
-async function stage(ctx: Ctx, amount: BN) {
-  const ix = await program.methods
-    .stageTranche(amount)
+async function resolveIx(
+  ctx: Ctx,
+  index: number,
+  share: BN,
+  signer?: Keypair,
+): Promise<TransactionInstruction> {
+  const resolver = signer ?? ctx.platform;
+  if (ctx.isNative) {
+    return program.methods
+      .resolveInvoiceSol(share)
+      .accountsPartial({
+        hourlyPeriod: ctx.period,
+        invoice: invoicePda(ctx.period, index),
+        escrowVault: ctx.vault,
+        employer: ctx.employer.publicKey,
+        employee: ctx.employee.publicKey,
+        feeRecipient: treasury.publicKey,
+        rentPayer: ctx.platform.publicKey,
+        platformAuthority: resolver.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+  }
+  return program.methods
+    .resolveInvoiceToken(share)
     .accountsPartial({
-      config: configPda,
       hourlyPeriod: ctx.period,
+      invoice: invoicePda(ctx.period, index),
+      tokenMint: mint,
       vaultTokenAccount: ctx.vault,
-      platformAuthority: ctx.platformAuthority.publicKey,
+      employer: ctx.employer.publicKey,
+      employerTokenAccount: ctx.employerAta,
+      employee: ctx.employee.publicKey,
+      employeeTokenAccount: ctx.employeeAta,
+      feeRecipient: treasury.publicKey,
+      platformTokenAccount: treasuryAta,
+      rentPayer: ctx.platform.publicKey,
+      platformAuthority: resolver.publicKey,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
     })
     .instruction();
-  return ix;
 }
 
-async function finalize(ctx: Ctx, index: number) {
-  const ix = await program.methods
-    .finalizeTranche(index)
+async function autoReleaseIx(
+  ctx: Ctx,
+  index: number,
+  caller?: Keypair,
+): Promise<TransactionInstruction> {
+  const c = caller ?? ctx.platform;
+  if (ctx.isNative) {
+    return program.methods
+      .autoReleaseInvoiceSol()
+      .accountsPartial({
+        hourlyPeriod: ctx.period,
+        invoice: invoicePda(ctx.period, index),
+        escrowVault: ctx.vault,
+        employee: ctx.employee.publicKey,
+        feeRecipient: treasury.publicKey,
+        rentPayer: ctx.platform.publicKey,
+        caller: c.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+  }
+  return program.methods
+    .autoReleaseInvoiceToken()
     .accountsPartial({
       hourlyPeriod: ctx.period,
+      invoice: invoicePda(ctx.period, index),
       tokenMint: mint,
       vaultTokenAccount: ctx.vault,
       employee: ctx.employee.publicKey,
       employeeTokenAccount: ctx.employeeAta,
       feeRecipient: treasury.publicKey,
       platformTokenAccount: treasuryAta,
-      caller: payer.publicKey,
+      rentPayer: ctx.platform.publicKey,
+      caller: c.publicKey,
       tokenProgram: TOKEN_PROGRAM_ID,
       associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
     })
     .instruction();
-  return ix;
 }
 
-async function raiseDispute(ctx: Ctx, index: number, deadline: number) {
-  const ix = await program.methods
-    .raiseHourlyDispute(index, new BN(deadline), Buffer.from("bad work"))
-    .accountsPartial({ hourlyPeriod: ctx.period, signer: payer.publicKey })
-    .instruction();
-  return ix;
-}
-
-async function resolve(ctx: Ctx, index: number, employeeShare: BN) {
-  const ix = await program.methods
-    .resolveHourlyTranche(index, employeeShare)
+async function settleIx(
+  ctx: Ctx,
+  caller?: Keypair,
+): Promise<TransactionInstruction> {
+  const c = caller ?? ctx.platform;
+  if (ctx.isNative) {
+    return program.methods
+      .settlePeriodSol()
+      .accountsPartial({
+        hourlyPeriod: ctx.period,
+        escrowVault: ctx.vault,
+        employer: ctx.employer.publicKey,
+        caller: c.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+  }
+  return program.methods
+    .settlePeriodToken()
     .accountsPartial({
       hourlyPeriod: ctx.period,
       tokenMint: mint,
       vaultTokenAccount: ctx.vault,
-      employer: payer.publicKey,
-      employerTokenAccount: payerAta,
-      employee: ctx.employee.publicKey,
-      employeeTokenAccount: ctx.employeeAta,
-      feeRecipient: treasury.publicKey,
-      platformTokenAccount: treasuryAta,
-      platformAuthority: ctx.platformAuthority.publicKey,
+      employer: ctx.employer.publicKey,
+      employerTokenAccount: ctx.employerAta,
+      caller: c.publicKey,
       tokenProgram: TOKEN_PROGRAM_ID,
       associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
     })
     .instruction();
-  return ix;
 }
 
-async function triggerAuto(ctx: Ctx, index: number) {
-  const ix = await program.methods
-    .triggerHourlyAutoRelease(index)
+async function closeIx(
+  ctx: Ctx,
+  caller?: Keypair,
+): Promise<TransactionInstruction> {
+  const c = caller ?? ctx.platform;
+  if (ctx.isNative) {
+    return program.methods
+      .closePeriodSol()
+      .accountsPartial({
+        hourlyPeriod: ctx.period,
+        escrowVault: ctx.vault,
+        employer: ctx.employer.publicKey,
+        rentPayer: ctx.rentPayer.publicKey,
+        caller: c.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+  }
+  return program.methods
+    .closePeriodToken()
     .accountsPartial({
       hourlyPeriod: ctx.period,
       tokenMint: mint,
       vaultTokenAccount: ctx.vault,
-      employee: ctx.employee.publicKey,
-      employeeTokenAccount: ctx.employeeAta,
-      feeRecipient: treasury.publicKey,
-      platformTokenAccount: treasuryAta,
-      caller: payer.publicKey,
+      employer: ctx.employer.publicKey,
+      employerTokenAccount: ctx.employerAta,
+      rentPayer: ctx.rentPayer.publicKey,
+      caller: c.publicKey,
       tokenProgram: TOKEN_PROGRAM_ID,
       associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
     })
     .instruction();
-  return ix;
-}
-
-async function refund(ctx: Ctx) {
-  const ix = await program.methods
-    .refundRemainder()
-    .accountsPartial({
-      hourlyPeriod: ctx.period,
-      vaultTokenAccount: ctx.vault,
-      employer: payer.publicKey,
-      employerTokenAccount: payerAta,
-      tokenMint: mint,
-      signer: payer.publicKey,
-      tokenProgram: TOKEN_PROGRAM_ID,
-      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
-    })
-    .instruction();
-  return ix;
 }
 
 async function setPaused(paused: boolean) {
   const ix = await program.methods
-    .updateConfig(null, null, paused, null)
+    .updateConfig(null, null, paused, null, null)
     .accountsPartial({ config: configPda, authority: payer.publicKey })
     .instruction();
   send([ix]);
+}
+
+async function setPlatformAuthority(pk: PublicKey) {
+  const ix = await program.methods
+    .updateConfig(null, null, null, null, pk)
+    .accountsPartial({ config: configPda, authority: payer.publicKey })
+    .instruction();
+  send([ix]);
+}
+
+async function openFunded(o: Parameters<typeof newCtx>[0] = {}): Promise<Ctx> {
+  const ctx = newCtx(o);
+  await open(ctx);
+  await fund(ctx);
+  return ctx;
 }
 
 beforeAll(async () => {
@@ -337,9 +662,12 @@ beforeAll(async () => {
   );
 
   payer = Keypair.generate();
-  svm.airdrop(payer.publicKey.toBytes(), BigInt(1000 * LAMPORTS_PER_SOL));
+  svm.airdrop(payer.publicKey.toBytes(), BigInt(100_000 * LAMPORTS_PER_SOL));
   treasury = Keypair.generate();
   svm.airdrop(treasury.publicKey.toBytes(), BigInt(LAMPORTS_PER_SOL));
+  platform = fundedKeypair(10_000);
+  RENT_RESERVE = svm.minimumBalanceForRentExemption(0n);
+  expect(RENT_RESERVE).toBe(890_880n);
 
   const conn = new Connection("http://localhost:8899");
   const wallet = new anchor.Wallet(payer);
@@ -348,10 +676,6 @@ beforeAll(async () => {
   });
   program = new anchor.Program(IDL as anchor.Idl, provider);
   [configPda] = PublicKey.findProgramAddressSync([seed("config")], PROGRAM_ID);
-  [delegateAuth] = PublicKey.findProgramAddressSync(
-    [seed("delegate_auth")],
-    PROGRAM_ID,
-  );
 
   const initIx = await program.methods
     .initConfig(treasury.publicKey, BPS, [])
@@ -380,328 +704,1031 @@ beforeAll(async () => {
     [mintKp],
   );
 
-  payerAta = getAssociatedTokenAddressSync(mint, payer.publicKey);
-  send([
-    createAssociatedTokenAccountInstruction(
-      payer.publicKey,
-      payerAta,
-      payer.publicKey,
-      mint,
-    ),
-    createMintToInstruction(mint, payerAta, payer.publicKey, 1_000_000_000_000),
-  ]);
-
-  treasuryAta = getAssociatedTokenAddressSync(mint, treasury.publicKey);
-  send([
-    createAssociatedTokenAccountInstruction(
-      payer.publicKey,
-      treasuryAta,
-      treasury.publicKey,
-      mint,
-    ),
-  ]);
+  treasuryAta = mintTo(treasury.publicKey, 0);
 
   const addMintIx = await program.methods
     .addAllowedMint(mint)
     .accountsPartial({ config: configPda, authority: payer.publicKey })
     .instruction();
   send([addMintIx]);
+
+  expect(decodeConfig().platformAuthority.toBase58()).toBe(
+    PublicKey.default.toBase58(),
+  );
+  await setPlatformAuthority(platform.publicKey);
+  expect(decodeConfig().platformAuthority.toBase58()).toBe(
+    platform.publicKey.toBase58(),
+  );
 });
 
-describe("hourly: open + fund", () => {
-  test("open_period creates the account with expected defaults", async () => {
-    const ctx = newHourly();
-    await openPeriod(ctx);
-    const p = decodeHourly(ctx.period);
-    expect(p.trancheCount).toBe(0);
-    expect(Number(p.weeklyCapNet.toString())).toBe(CAP.toNumber());
-    expect(Object.keys(p.status)[0]).toBe("open");
-    expect(p.tranches.length).toBe(7);
-    expect(trancheStatus(p.tranches[0])).toBe("empty");
-  });
-
-  test("re-open of the same (hire, index) is blocked", async () => {
-    const ctx = newHourly();
-    await openPeriod(ctx);
-    const ix = await program.methods
-      .openPeriod(ctx.hireId, ctx.periodIndex, CAP, BPS, REVIEW)
-      .accountsPartial({
-        config: configPda,
-        hourlyPeriod: ctx.period,
-        employer: payer.publicKey,
-        employee: ctx.employee.publicKey,
-        platformAuthority: ctx.platformAuthority.publicKey,
-        feeRecipient: treasury.publicKey,
-        tokenMint: mint,
-        vaultTokenAccount: ctx.vault,
-        employeeTokenAccount: ctx.employeeAta,
-        platformTokenAccount: treasuryAta,
-        payer: payer.publicKey,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .instruction();
-    const res = svm.sendLegacyTransaction(buildTx([ix], []).serialize());
-    expect(res.constructor.name).toBe("FailedTransactionMetadata");
-  });
-
-  test("fund_period moves cap_gross; second fund is rejected", async () => {
-    const ctx = newHourly();
-    await openPeriod(ctx);
-    await fundPeriod(ctx);
-    expect(tokenBalance(ctx.vault)).toBe(BigInt(CAP_GROSS.toString()));
-    const p = decodeHourly(ctx.period);
-    expect(Object.keys(p.status)[0]).toBe("funded");
-    expect(Number(p.fundedAmount.toString())).toBe(CAP_GROSS.toNumber());
-
-    const ix = await program.methods
-      .fundPeriod()
-      .accountsPartial({
-        config: configPda,
-        hourlyPeriod: ctx.period,
-        vaultTokenAccount: ctx.vault,
-        employer: payer.publicKey,
-        employerTokenAccount: payerAta,
-        tokenMint: mint,
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
-      .instruction();
-    expectFail([ix], [], "PeriodFullyFunded");
-  });
-});
-
-describe("hourly: stage + finalize", () => {
-  test("stage then finalize pays exactly tranche net + commission; siblings untouched", async () => {
-    const ctx = newHourly();
-    await openPeriod(ctx);
-    await fundPeriod(ctx);
-
-    const a0 = new BN(400_000);
-    const a1 = new BN(300_000);
-    send([await stage(ctx, a0)], [ctx.platformAuthority]);
-    send([await stage(ctx, a1)], [ctx.platformAuthority]);
-
-    const treBefore = tokenBalance(treasuryAta);
-    const vaultBefore = tokenBalance(ctx.vault);
-
-    warpBy(7 * DAY + 1);
-    send([await finalize(ctx, 0)]);
-
-    expect(tokenBalance(ctx.employeeAta)).toBe(BigInt(a0.toString()));
-    expect(tokenBalance(treasuryAta) - treBefore).toBe(
-      BigInt(commission(a0).toString()),
+describe("hourly v2 token: open_period", () => {
+  test("employer signer opens a v2 period and becomes rent_payer", async () => {
+    const ctx = newCtx();
+    await open(ctx);
+    const p = decodePeriod(ctx.period);
+    expect(p.version).toBe(2);
+    expect(statusOf(p.status)).toBe("open");
+    expect(p.employer.toBase58()).toBe(ctx.employer.publicKey.toBase58());
+    expect(p.employee.toBase58()).toBe(ctx.employee.publicKey.toBase58());
+    expect(p.platformAuthority.toBase58()).toBe(
+      ctx.platform.publicKey.toBase58(),
     );
-    const moved = a0.add(commission(a0));
-    expect(vaultBefore - tokenBalance(ctx.vault)).toBe(
-      BigInt(moved.toString()),
-    );
-
-    const p = decodeHourly(ctx.period);
-    expect(trancheStatus(p.tranches[0])).toBe("finalized");
-    expect(trancheStatus(p.tranches[1])).toBe("frozen");
+    expect(p.feeRecipient.toBase58()).toBe(treasury.publicKey.toBase58());
+    expect(p.rentPayer.toBase58()).toBe(ctx.employer.publicKey.toBase58());
+    expect(p.tokenMint.toBase58()).toBe(mint.toBase58());
+    expect(p.isNative).toBe(false);
+    expect(n(p.weeklyCapNet)).toBe(n(CAP));
+    expect(p.commissionRateBps).toBe(BPS);
+    expect(p.invoiceCount).toBe(0);
+    expect(p.liveInvoices).toBe(0);
+    expect(n(p.fundedGross)).toBe(0);
+    expect(n(p.outstandingNet)).toBe(0);
+    expect(n(p.outstandingCommission)).toBe(0);
+    expect(n(p.periodEndAt)).toBe(n(p.periodStartAt) + DURATION);
   });
 
-  test("finalize before window elapses is rejected", async () => {
-    const ctx = newHourly();
-    await openPeriod(ctx);
-    await fundPeriod(ctx);
-    send([await stage(ctx, new BN(100_000))], [ctx.platformAuthority]);
-    expectFail([await finalize(ctx, 0)], [], "TrancheWindowNotElapsed");
+  test("platform authority may open and is recorded as rent_payer", async () => {
+    const ctx = newCtx();
+    await open(ctx, ctx.platform);
+    const p = decodePeriod(ctx.period);
+    expect(p.rentPayer.toBase58()).toBe(ctx.platform.publicKey.toBase58());
+    expect(p.employer.toBase58()).toBe(ctx.employer.publicKey.toBase58());
   });
 
-  test("double-finalize of the same tranche is rejected", async () => {
-    const ctx = newHourly();
-    await openPeriod(ctx);
-    await fundPeriod(ctx);
-    send([await stage(ctx, new BN(100_000))], [ctx.platformAuthority]);
-    warpBy(7 * DAY + 1);
-    send([await finalize(ctx, 0)]);
-    expectFail([await finalize(ctx, 0)], [], "TrancheNotFrozen");
-  });
-
-  test("finalize on an unstaged index is out of bounds", async () => {
-    const ctx = newHourly();
-    await openPeriod(ctx);
-    await fundPeriod(ctx);
-    expectFail([await finalize(ctx, 0)], [], "InvalidTrancheIndex");
-  });
-});
-
-describe("hourly: cap enforcement", () => {
-  test("staging past the weekly cap is rejected", async () => {
-    const ctx = newHourly();
-    await openPeriod(ctx);
-    await fundPeriod(ctx);
-    send([await stage(ctx, new BN(900_000))], [ctx.platformAuthority]);
+  test("a random signer cannot open (Unauthorized)", async () => {
+    const ctx = newCtx();
+    const stranger = fundedKeypair();
     expectFail(
-      [await stage(ctx, new BN(200_000))],
-      [ctx.platformAuthority],
-      "WeeklyCapExceeded",
+      [await openIx(ctx, { authorizer: stranger })],
+      [stranger],
+      "Unauthorized",
     );
   });
 
-  test("an 8th tranche is rejected", async () => {
-    const ctx = newHourly();
-    await openPeriod(ctx);
-    await fundPeriod(ctx);
-    for (let i = 0; i < 7; i++) {
-      send([await stage(ctx, new BN(100_000))], [ctx.platformAuthority]);
-    }
+  test("employer == employee is rejected", async () => {
+    const ctx = newCtx();
     expectFail(
-      [await stage(ctx, new BN(100_000))],
-      [ctx.platformAuthority],
-      "TrancheLimitReached",
+      [await openIx(ctx, { employee: ctx.employer.publicKey })],
+      [ctx.employer],
+      "EmployeeIsEmployer",
     );
   });
-});
 
-describe("hourly: disputes", () => {
-  test("raise dispute freezes the tranche and moves no money", async () => {
-    const ctx = newHourly();
-    await openPeriod(ctx);
-    await fundPeriod(ctx);
-    send([await stage(ctx, new BN(400_000))], [ctx.platformAuthority]);
-    const vaultBefore = tokenBalance(ctx.vault);
-    send([await raiseDispute(ctx, 0, now() + 5 * DAY)]);
-    expect(tokenBalance(ctx.vault)).toBe(vaultBefore);
-    const p = decodeHourly(ctx.period);
-    expect(trancheStatus(p.tranches[0])).toBe("disputed");
-    expectFail([await finalize(ctx, 0)], [], "TrancheNotFrozen");
-  });
-
-  test("resolve splits the tranche exactly: worker + treasury + employer == amount + commission", async () => {
-    const ctx = newHourly();
-    await openPeriod(ctx);
-    await fundPeriod(ctx);
-    const amt = new BN(400_000);
-    send([await stage(ctx, amt)], [ctx.platformAuthority]);
-    send([await raiseDispute(ctx, 0, now() + 5 * DAY)]);
-
-    const empBefore = tokenBalance(ctx.employeeAta);
-    const treBefore = tokenBalance(treasuryAta);
-    const employerBefore = tokenBalance(payerAta);
-    const vaultBefore = tokenBalance(ctx.vault);
-
-    const share = new BN(250_000);
-    send([await resolve(ctx, 0, share)], [ctx.platformAuthority]);
-
-    const empDelta = tokenBalance(ctx.employeeAta) - empBefore;
-    const treDelta = tokenBalance(treasuryAta) - treBefore;
-    const employerDelta = tokenBalance(payerAta) - employerBefore;
-    const vaultDelta = vaultBefore - tokenBalance(ctx.vault);
-
-    const trancheCommission = commission(amt);
-    const total = amt.add(trancheCommission);
-    expect(empDelta).toBe(BigInt(share.toString()));
-    expect(empDelta + treDelta + employerDelta).toBe(BigInt(total.toString()));
-    expect(vaultDelta).toBe(BigInt(total.toString()));
-
-    const p = decodeHourly(ctx.period);
-    expect(trancheStatus(p.tranches[0])).toBe("resolved");
-  });
-
-  test("auto-release after deadline pays the worker in full; before deadline is rejected", async () => {
-    const ctx = newHourly();
-    await openPeriod(ctx);
-    await fundPeriod(ctx);
-    const amt = new BN(400_000);
-    send([await stage(ctx, amt)], [ctx.platformAuthority]);
-    const deadline = now() + 4 * DAY;
-    send([await raiseDispute(ctx, 0, deadline)]);
-
-    expectFail([await triggerAuto(ctx, 0)], [], "DisputeDeadlineNotReached");
-
-    const empBefore = tokenBalance(ctx.employeeAta);
-    const treBefore = tokenBalance(treasuryAta);
-    warpBy(4 * DAY + 1);
-    send([await triggerAuto(ctx, 0)]);
-    expect(tokenBalance(ctx.employeeAta) - empBefore).toBe(
-      BigInt(amt.toString()),
-    );
-    expect(tokenBalance(treasuryAta) - treBefore).toBe(
-      BigInt(commission(amt).toString()),
+  test("commission bps above 1000 is rejected", async () => {
+    const ctx = newCtx();
+    expectFail(
+      [await openIx(ctx, { bps: 1001 })],
+      [ctx.employer],
+      "InvalidCommissionRate",
     );
   });
-});
 
-describe("hourly: refund safety", () => {
-  test("refund returns only vault-minus-liabilities; a frozen tranche still finalizes", async () => {
-    const ctx = newHourly();
-    await openPeriod(ctx);
-    await fundPeriod(ctx);
-    const amt = new BN(400_000);
-    send([await stage(ctx, amt)], [ctx.platformAuthority]);
-
-    const liabilities = amt.add(commission(amt));
-    const employerBefore = tokenBalance(payerAta);
-    const vaultBefore = tokenBalance(ctx.vault);
-
-    send([await refund(ctx)]);
-
-    const refunded = vaultBefore - BigInt(liabilities.toString());
-    expect(tokenBalance(payerAta) - employerBefore).toBe(refunded);
-    expect(tokenBalance(ctx.vault)).toBe(BigInt(liabilities.toString()));
-
-    warpBy(7 * DAY + 1);
-    send([await finalize(ctx, 0)]);
-    expect(tokenBalance(ctx.employeeAta)).toBe(BigInt(amt.toString()));
+  test("duration shorter than one day is rejected", async () => {
+    const ctx = newCtx();
+    expectFail(
+      [await openIx(ctx, { duration: DAY - 1 })],
+      [ctx.employer],
+      "InvalidPeriodWindow",
+    );
   });
-});
 
-describe("hourly: external delegate funding", () => {
-  test("pull_fund_period funds the vault via the delegate; replay is rejected", async () => {
-    const ctx = newHourly();
-    await openPeriod(ctx);
-    send([
-      createApproveInstruction(
-        payerAta,
-        delegateAuth,
-        payer.publicKey,
-        BigInt(CAP_GROSS.toString()) * 4n,
-      ),
-    ]);
-    await pullFundPeriod(ctx);
-    expect(tokenBalance(ctx.vault)).toBe(BigInt(CAP_GROSS.toString()));
+  test("duration longer than 30 days is rejected", async () => {
+    const ctx = newCtx();
+    expectFail(
+      [await openIx(ctx, { duration: 31 * DAY })],
+      [ctx.employer],
+      "InvalidPeriodWindow",
+    );
+  });
+
+  test("a window that already ended is rejected", async () => {
+    const ctx = newCtx();
+    expectFail(
+      [await openIx(ctx, { startAt: now() - 8 * DAY, duration: 7 * DAY })],
+      [ctx.employer],
+      "PeriodEnded",
+    );
+  });
+
+  test("a fee_recipient that is not the config treasury is rejected", async () => {
+    const ctx = newCtx();
+    expectFail(
+      [await openIx(ctx, { feeRecipient: Keypair.generate().publicKey })],
+      [ctx.employer],
+      "InvalidFeeRecipient",
+    );
+  });
+
+  test("a stranger naming themselves platform_authority is rejected", async () => {
+    const ctx = newCtx();
+    const stranger = fundedKeypair();
     expectFail(
       [
-        await program.methods
-          .pullFundPeriod()
-          .accountsPartial({
-            config: configPda,
-            hourlyPeriod: ctx.period,
-            vaultTokenAccount: ctx.vault,
-            employerTokenAccount: payerAta,
-            delegateAuthority: delegateAuth,
-            tokenMint: mint,
-            caller: payer.publicKey,
-            tokenProgram: TOKEN_PROGRAM_ID,
-          })
-          .instruction(),
+        await openIx(ctx, {
+          authorizer: stranger,
+          platform: stranger.publicKey,
+        }),
       ],
-      [],
-      "PeriodFullyFunded",
+      [stranger],
+      "InvalidPlatformAuthority",
+    );
+    expect(exists(ctx.period)).toBe(false);
+  });
+
+  test("the employer may open their own period but cannot name a hostile arbitrator", async () => {
+    const ctx = newCtx();
+    const hostile = fundedKeypair();
+    expectFail(
+      [await openIx(ctx, { platform: hostile.publicKey })],
+      [ctx.employer],
+      "InvalidPlatformAuthority",
+    );
+    expect(exists(ctx.period)).toBe(false);
+
+    send([await openIx(ctx, { authorizer: ctx.employer })], [ctx.employer]);
+    const p = decodePeriod(ctx.period);
+    expect(p.platformAuthority.toBase58()).toBe(platform.publicKey.toBase58());
+    expect(p.platformAuthority.toBase58()).toBe(
+      decodeConfig().platformAuthority.toBase58(),
+    );
+    expect(p.rentPayer.toBase58()).toBe(ctx.employer.publicKey.toBase58());
+  });
+
+  test("open is blocked until config.platform_authority is set", async () => {
+    const ctx = newCtx();
+    await setPlatformAuthority(PublicKey.default);
+    expect(decodeConfig().platformAuthority.toBase58()).toBe(
+      PublicKey.default.toBase58(),
+    );
+
+    expectFail(
+      [await openIx(ctx, { platform: platform.publicKey })],
+      [ctx.employer],
+      "InvalidPlatformAuthority",
+    );
+    expectFail(
+      [await openIx(ctx, { platform: PublicKey.default })],
+      [ctx.employer],
+      "InvalidPlatformAuthority",
+    );
+    expect(exists(ctx.period)).toBe(false);
+
+    await setPlatformAuthority(platform.publicKey);
+    await open(ctx);
+    expect(statusOf(decodePeriod(ctx.period).status)).toBe("open");
+    expect(decodePeriod(ctx.period).platformAuthority.toBase58()).toBe(
+      platform.publicKey.toBase58(),
+    );
+  });
+
+  test("open is blocked while the program is paused", async () => {
+    const ctx = newCtx();
+    await setPaused(true);
+    expectFail([await openIx(ctx)], [ctx.employer], "ProgramPaused");
+    await setPaused(false);
+    await open(ctx);
+    expect(statusOf(decodePeriod(ctx.period).status)).toBe("open");
+  });
+});
+
+describe("hourly v2 token: fund_period_token", () => {
+  test("funds the vault to cap_gross exactly; a second call is PeriodFullyFunded", async () => {
+    const ctx = newCtx();
+    await open(ctx);
+    const gross = capGross(ctx);
+    const employerBefore = tokenBalance(ctx.employerAta);
+    expectFail(
+      [await fundIx(ctx, gross.subn(1))],
+      [ctx.employer],
+      "FundExceedsMax",
+    );
+    expect(tokenBalance(ctx.vault)).toBe(0n);
+    await fund(ctx);
+    expect(tokenBalance(ctx.vault)).toBe(BigInt(gross.toString()));
+    expect(employerBefore - tokenBalance(ctx.employerAta)).toBe(
+      BigInt(gross.toString()),
+    );
+    const p = decodePeriod(ctx.period);
+    expect(statusOf(p.status)).toBe("funded");
+    expect(n(p.fundedGross)).toBe(n(gross));
+    expect(n(p.fundedAt)).toBeGreaterThan(0);
+    expectFail([await fundIx(ctx)], [ctx.employer], "PeriodFullyFunded");
+  });
+});
+
+describe("hourly v2: max_fund_amount bound", () => {
+  test("a stale bound protects the employer from a raise_weekly_cap front-run", async () => {
+    const ctx = newCtx({ isNative: true, capNet: new BN(1_000_000) });
+    await open(ctx);
+    const gross = capGross(ctx);
+
+    expectFail(
+      [await fundIx(ctx, gross.subn(1))],
+      [ctx.employer],
+      "FundExceedsMax",
+    );
+    expect(lamports(ctx.vault)).toBe(0n);
+
+    send([await fundIx(ctx, gross)], [ctx.employer]);
+    expect(lamports(ctx.vault)).toBe(BigInt(gross.toString()) + RENT_RESERVE);
+    expect(n(decodePeriod(ctx.period).fundedGross)).toBe(n(gross));
+
+    const raised = new BN(100 * LAMPORTS_PER_SOL);
+    send([await raiseCapIx(ctx, raised, ctx.platform)], [ctx.platform]);
+    const raisedGross = grossOf(raised);
+    const toFund = raisedGross.sub(gross);
+
+    const employerBefore = lamports(ctx.employer.publicKey);
+    expectFail([await fundIx(ctx, gross)], [ctx.employer], "FundExceedsMax");
+    expectFail(
+      [await fundIx(ctx, toFund.subn(1))],
+      [ctx.employer],
+      "FundExceedsMax",
+    );
+    expect(lamports(ctx.employer.publicKey)).toBe(employerBefore);
+    expect(lamports(ctx.vault)).toBe(BigInt(gross.toString()) + RENT_RESERVE);
+
+    send([await fundIx(ctx, toFund)], [ctx.employer]);
+    expect(lamports(ctx.vault)).toBe(
+      BigInt(raisedGross.toString()) + RENT_RESERVE,
+    );
+    expect(employerBefore - lamports(ctx.employer.publicKey)).toBe(
+      BigInt(toFund.toString()),
+    );
+    expect(n(decodePeriod(ctx.period).fundedGross)).toBe(n(raisedGross));
+    expect(BigInt(n(decodePeriod(ctx.period).vaultRentReserve))).toBe(
+      RENT_RESERVE,
     );
   });
 });
 
-describe("hourly: pause invariant", () => {
-  test("pause blocks staging but never blocks finalize", async () => {
-    const ctx = newHourly();
-    await openPeriod(ctx);
-    await fundPeriod(ctx);
-    send([await stage(ctx, new BN(400_000))], [ctx.platformAuthority]);
+describe("hourly v2 token: stage_invoice_token", () => {
+  test("stages nine invoices with sequential indices, then enforces cap and vault solvency", async () => {
+    const ctx = await openFunded();
+    const amt = new BN(100_000);
+    for (let i = 0; i < 9; i++) {
+      const idx = await stage(ctx, amt);
+      expect(idx).toBe(i);
+      const inv = decodeInvoice(invoicePda(ctx.period, i));
+      expect(inv.version).toBe(1);
+      expect(inv.invoiceIndex).toBe(i);
+      expect(inv.period.toBase58()).toBe(ctx.period.toBase58());
+      expect(n(inv.amountNet)).toBe(100_000);
+      expect(n(inv.commission)).toBe(5_000);
+      expect(statusOf(inv.status)).toBe("staged");
+      expect(inv.rentPayer.toBase58()).toBe(ctx.platform.publicKey.toBase58());
+      expect(n(inv.releaseAt)).toBe(n(inv.stagedAt) + REVIEW);
+      expect(n(inv.disputeDeadline)).toBe(0);
+    }
+    let p = decodePeriod(ctx.period);
+    expect(p.invoiceCount).toBe(9);
+    expect(p.liveInvoices).toBe(9);
+    expect(statusOf(p.status)).toBe("active");
+    expect(n(p.totalStagedNet)).toBe(900_000);
+    expect(n(p.outstandingNet)).toBe(900_000);
+    expect(n(p.outstandingCommission)).toBe(45_000);
+
+    expectFail(
+      [await stageIx(ctx, new BN(200_000))],
+      [ctx.platform],
+      "WeeklyCapExceeded",
+    );
+
+    send([await raiseCapIx(ctx, new BN(2_000_000))], [ctx.employer]);
+    expectFail(
+      [await stageIx(ctx, new BN(200_000))],
+      [ctx.platform],
+      "VaultUnderfunded",
+    );
+
+    await fund(ctx);
+    expect(tokenBalance(ctx.vault)).toBe(2_100_000n);
+    const idx = await stage(ctx, new BN(200_000));
+    expect(idx).toBe(9);
+    p = decodePeriod(ctx.period);
+    expect(p.invoiceCount).toBe(10);
+    expect(p.liveInvoices).toBe(10);
+    expect(n(p.totalStagedNet)).toBe(1_100_000);
+    expect(n(p.outstandingCommission)).toBe(55_000);
+  });
+
+  test("only the period platform authority may stage", async () => {
+    const ctx = await openFunded();
+    const stranger = fundedKeypair();
+    expectFail(
+      [await stageIx(ctx, new BN(100_000), { signer: stranger })],
+      [stranger],
+      "Unauthorized",
+    );
+  });
+
+  test("staging after period_end_at is rejected", async () => {
+    const ctx = await openFunded();
+    warpTo(ctx.endAt + 1);
+    expectFail(
+      [await stageIx(ctx, new BN(100_000))],
+      [ctx.platform],
+      "PeriodEnded",
+    );
+  });
+
+  test("staging before period_start_at is rejected", async () => {
+    const ctx = await openFunded({ startOffset: 2 * DAY });
+    expectFail(
+      [await stageIx(ctx, new BN(100_000))],
+      [ctx.platform],
+      "PeriodNotStarted",
+    );
+  });
+});
+
+describe("hourly v2: raise_weekly_cap", () => {
+  test("the cap is monotonic and may be raised by employer or platform", async () => {
+    const ctx = await openFunded();
+    expectFail(
+      [await raiseCapIx(ctx, ctx.capNet.subn(1))],
+      [ctx.employer],
+      "CapCannotDecrease",
+    );
+    send([await raiseCapIx(ctx, new BN(1_500_000))], [ctx.employer]);
+    expect(n(decodePeriod(ctx.period).weeklyCapNet)).toBe(1_500_000);
+    send(
+      [await raiseCapIx(ctx, new BN(1_800_000), ctx.platform)],
+      [ctx.platform],
+    );
+    expect(n(decodePeriod(ctx.period).weeklyCapNet)).toBe(1_800_000);
+    const stranger = fundedKeypair();
+    expectFail(
+      [await raiseCapIx(ctx, new BN(1_900_000), stranger)],
+      [stranger],
+      "Unauthorized",
+    );
+  });
+});
+
+describe("hourly v2 token: raise_invoice_dispute", () => {
+  test("both employer and employee can dispute their own invoices", async () => {
+    const ctx = await openFunded();
+    const i0 = await stage(ctx, new BN(200_000));
+    const i1 = await stage(ctx, new BN(200_000));
+    send(
+      [await disputeIx(ctx, i0, now() + 5 * DAY, ctx.employer)],
+      [ctx.employer],
+    );
+    send(
+      [await disputeIx(ctx, i1, now() + 5 * DAY, ctx.employee)],
+      [ctx.employee],
+    );
+    const a = decodeInvoice(invoicePda(ctx.period, i0));
+    const b = decodeInvoice(invoicePda(ctx.period, i1));
+    expect(statusOf(a.status)).toBe("disputed");
+    expect(statusOf(b.status)).toBe("disputed");
+    expect(a.disputedBy.toBase58()).toBe(ctx.employer.publicKey.toBase58());
+    expect(b.disputedBy.toBase58()).toBe(ctx.employee.publicKey.toBase58());
+    const p = decodePeriod(ctx.period);
+    expect(p.liveInvoices).toBe(2);
+    expect(n(p.outstandingNet)).toBe(400_000);
+  });
+
+  test("an unrelated key cannot dispute", async () => {
+    const ctx = await openFunded();
+    const i0 = await stage(ctx, new BN(200_000));
+    const stranger = fundedKeypair();
+    expectFail(
+      [await disputeIx(ctx, i0, now() + 5 * DAY, stranger)],
+      [stranger],
+      "Unauthorized",
+    );
+  });
+
+  test("disputing after release_at is rejected", async () => {
+    const ctx = await openFunded();
+    const i0 = await stage(ctx, new BN(200_000));
+    warpBy(REVIEW + 1);
+    expectFail(
+      [await disputeIx(ctx, i0, now() + 5 * DAY, ctx.employer)],
+      [ctx.employer],
+      "DisputeWindowClosed",
+    );
+  });
+
+  test("dispute deadlines outside [3d, 90d] are rejected", async () => {
+    const ctx = await openFunded();
+    const i0 = await stage(ctx, new BN(200_000));
+    expectFail(
+      [await disputeIx(ctx, i0, now() + 2 * DAY, ctx.employer)],
+      [ctx.employer],
+      "DisputeWindowTooShort",
+    );
+    expectFail(
+      [await disputeIx(ctx, i0, now() + 91 * DAY, ctx.employer)],
+      [ctx.employer],
+      "DisputeDeadlineTooLong",
+    );
+    send(
+      [await disputeIx(ctx, i0, now() + 3 * DAY, ctx.employer)],
+      [ctx.employer],
+    );
+    expect(statusOf(decodeInvoice(invoicePda(ctx.period, i0)).status)).toBe(
+      "disputed",
+    );
+  });
+});
+
+describe("hourly v2 token: finalize_invoice_token", () => {
+  test("a random caller finalizes after release_at with exact money motion and rent refund", async () => {
+    const ctx = await openFunded();
+    const a0 = new BN(400_000);
+    const a1 = new BN(300_000);
+    const i0 = await stage(ctx, a0);
+    const i1 = await stage(ctx, a1);
+
+    expectFail(
+      [await finalizeIx(ctx, i0)],
+      [ctx.platform],
+      "InvoiceWindowNotElapsed",
+    );
+
+    const invoiceAcc = invoicePda(ctx.period, i0);
+    const invoiceRent = lamports(invoiceAcc);
+    expect(invoiceRent).toBeGreaterThan(0n);
+    const stranger = fundedKeypair();
+    const employeeBefore = tokenBalance(ctx.employeeAta);
+    const treasuryBefore = tokenBalance(treasuryAta);
+    const vaultBefore = tokenBalance(ctx.vault);
+    const platformBefore = lamports(ctx.platform.publicKey);
+
+    warpBy(REVIEW + 1);
+    send([await finalizeIx(ctx, i0, { caller: stranger })], [stranger]);
+
+    expect(tokenBalance(ctx.employeeAta) - employeeBefore).toBe(
+      BigInt(a0.toString()),
+    );
+    expect(tokenBalance(treasuryAta) - treasuryBefore).toBe(
+      BigInt(commission(a0).toString()),
+    );
+    expect(vaultBefore - tokenBalance(ctx.vault)).toBe(
+      BigInt(grossOf(a0).toString()),
+    );
+    expect(exists(invoiceAcc)).toBe(false);
+    expect(lamports(ctx.platform.publicKey) - platformBefore).toBe(invoiceRent);
+
+    const p = decodePeriod(ctx.period);
+    expect(p.liveInvoices).toBe(1);
+    expect(n(p.releasedNet)).toBe(n(a0));
+    expect(n(p.outstandingNet)).toBe(n(a1));
+    expect(n(p.outstandingCommission)).toBe(n(commission(a1)));
+    expect(statusOf(decodeInvoice(invoicePda(ctx.period, i1)).status)).toBe(
+      "staged",
+    );
+  });
+
+  test("a disputed invoice cannot be finalized", async () => {
+    const ctx = await openFunded();
+    const i0 = await stage(ctx, new BN(200_000));
+    send(
+      [await disputeIx(ctx, i0, now() + 3 * DAY, ctx.employer)],
+      [ctx.employer],
+    );
+    warpBy(REVIEW + 1);
+    expectFail([await finalizeIx(ctx, i0)], [ctx.platform], "InvoiceNotStaged");
+  });
+});
+
+describe("hourly v2 token: resolve_invoice_token", () => {
+  test("resolve splits net + commission exactly across employee, treasury and employer", async () => {
+    const ctx = await openFunded();
+    const amt = new BN(400_000);
+    const i0 = await stage(ctx, amt);
+    send(
+      [await disputeIx(ctx, i0, now() + 5 * DAY, ctx.employee)],
+      [ctx.employee],
+    );
+
+    const share = new BN(250_000);
+    const invCommission = commission(amt);
+    const treasuryLeg = commission(share);
+    const employerLeg = amt.sub(share).add(invCommission.sub(treasuryLeg));
+
+    const employeeBefore = tokenBalance(ctx.employeeAta);
+    const treasuryBefore = tokenBalance(treasuryAta);
+    const employerBefore = tokenBalance(ctx.employerAta);
+    const vaultBefore = tokenBalance(ctx.vault);
+    const invoiceAcc = invoicePda(ctx.period, i0);
+    const invoiceRent = lamports(invoiceAcc);
+    const platformBefore = lamports(ctx.platform.publicKey);
+
+    send([await resolveIx(ctx, i0, share)], [ctx.platform]);
+
+    const employeeDelta = tokenBalance(ctx.employeeAta) - employeeBefore;
+    const treasuryDelta = tokenBalance(treasuryAta) - treasuryBefore;
+    const employerDelta = tokenBalance(ctx.employerAta) - employerBefore;
+    expect(employeeDelta).toBe(BigInt(share.toString()));
+    expect(treasuryDelta).toBe(BigInt(treasuryLeg.toString()));
+    expect(employerDelta).toBe(BigInt(employerLeg.toString()));
+    expect(employeeDelta + treasuryDelta + employerDelta).toBe(
+      BigInt(grossOf(amt).toString()),
+    );
+    expect(vaultBefore - tokenBalance(ctx.vault)).toBe(
+      BigInt(grossOf(amt).toString()),
+    );
+    expect(exists(invoiceAcc)).toBe(false);
+    expect(lamports(ctx.platform.publicKey) - platformBefore).toBeGreaterThan(
+      0n,
+    );
+    expect(invoiceRent).toBeGreaterThan(0n);
+
+    const p = decodePeriod(ctx.period);
+    expect(p.liveInvoices).toBe(0);
+    expect(n(p.releasedNet)).toBe(n(share));
+    expect(n(p.outstandingNet)).toBe(0);
+    expect(n(p.outstandingCommission)).toBe(0);
+  });
+
+  test("employee_share above the invoice amount is rejected", async () => {
+    const ctx = await openFunded();
+    const i0 = await stage(ctx, new BN(200_000));
+    send(
+      [await disputeIx(ctx, i0, now() + 5 * DAY, ctx.employer)],
+      [ctx.employer],
+    );
+    expectFail(
+      [await resolveIx(ctx, i0, new BN(200_001))],
+      [ctx.platform],
+      "EmployeeShareExceedsInvoice",
+    );
+  });
+
+  test("only the platform authority may resolve", async () => {
+    const ctx = await openFunded();
+    const i0 = await stage(ctx, new BN(200_000));
+    send(
+      [await disputeIx(ctx, i0, now() + 5 * DAY, ctx.employer)],
+      [ctx.employer],
+    );
+    const stranger = fundedKeypair();
+    expectFail(
+      [await resolveIx(ctx, i0, new BN(100_000), stranger)],
+      [stranger],
+      "Unauthorized",
+    );
+  });
+});
+
+describe("hourly v2 token: auto_release_invoice_token", () => {
+  test("permissionless auto-release only after the long-stop deadline", async () => {
+    const ctx = await openFunded();
+    const amt = new BN(300_000);
+    const i0 = await stage(ctx, amt);
+    const deadline = now() + 3 * DAY;
+    send([await disputeIx(ctx, i0, deadline, ctx.employee)], [ctx.employee]);
+
+    expectFail(
+      [await autoReleaseIx(ctx, i0)],
+      [ctx.platform],
+      "DisputeDeadlineNotReached",
+    );
+
+    const stranger = fundedKeypair();
+    const employeeBefore = tokenBalance(ctx.employeeAta);
+    const treasuryBefore = tokenBalance(treasuryAta);
+    warpTo(deadline + 1);
+    send([await autoReleaseIx(ctx, i0, stranger)], [stranger]);
+
+    expect(tokenBalance(ctx.employeeAta) - employeeBefore).toBe(
+      BigInt(amt.toString()),
+    );
+    expect(tokenBalance(treasuryAta) - treasuryBefore).toBe(
+      BigInt(commission(amt).toString()),
+    );
+    expect(exists(invoicePda(ctx.period, i0))).toBe(false);
+    const p = decodePeriod(ctx.period);
+    expect(p.liveInvoices).toBe(0);
+    expect(n(p.releasedNet)).toBe(n(amt));
+  });
+});
+
+describe("hourly v2 token: settle_period_token + close_period_token", () => {
+  test("settle refunds vault minus outstanding, then close reclaims rents after every invoice clears", async () => {
+    const ctx = newCtx({ review: 2 * DAY });
+    await open(ctx, ctx.platform);
+    await fund(ctx);
+
+    const a0 = new BN(300_000);
+    const a1 = new BN(200_000);
+    const i0 = await stage(ctx, a0);
+    const i1 = await stage(ctx, a1);
+    send(
+      [await disputeIx(ctx, i0, now() + 5 * DAY, ctx.employer)],
+      [ctx.employer],
+    );
+
+    expectFail([await settleIx(ctx)], [ctx.platform], "PeriodNotEnded");
+
+    warpTo(ctx.endAt + 1);
+    const outstanding = grossOf(a0).add(grossOf(a1));
+    const vaultBefore = tokenBalance(ctx.vault);
+    const employerBefore = tokenBalance(ctx.employerAta);
+    send([await settleIx(ctx)], [ctx.platform]);
+
+    const refunded = vaultBefore - BigInt(outstanding.toString());
+    expect(refunded).toBeGreaterThan(0n);
+    expect(tokenBalance(ctx.employerAta) - employerBefore).toBe(refunded);
+    expect(tokenBalance(ctx.vault)).toBe(BigInt(outstanding.toString()));
+    let p = decodePeriod(ctx.period);
+    expect(statusOf(p.status)).toBe("settled");
+    expect(n(p.refundedAmount)).toBe(Number(refunded));
+    expect(p.liveInvoices).toBe(2);
+    expect(statusOf(decodeInvoice(invoicePda(ctx.period, i0)).status)).toBe(
+      "disputed",
+    );
+    expect(statusOf(decodeInvoice(invoicePda(ctx.period, i1)).status)).toBe(
+      "staged",
+    );
+
+    expectFail([await settleIx(ctx)], [ctx.platform], "PeriodAlreadySettled");
+    expectFail(
+      [await stageIx(ctx, new BN(10_000))],
+      [ctx.platform],
+      "InvalidStatus",
+    );
+    expectFail([await closeIx(ctx)], [ctx.platform], "LiveInvoicesOutstanding");
+
+    send([await resolveIx(ctx, i0, a0)], [ctx.platform]);
+    send([await finalizeIx(ctx, i1)], [ctx.platform]);
+    expect(tokenBalance(ctx.vault)).toBe(0n);
+
+    const dust = 777n;
+    send([
+      createMintToInstruction(mint, ctx.vault, payer.publicKey, Number(dust)),
+    ]);
+
+    p = decodePeriod(ctx.period);
+    expect(p.liveInvoices).toBe(0);
+    const periodRent = lamports(ctx.period);
+    const vaultRent = lamports(ctx.vault);
+    expect(periodRent).toBeGreaterThan(0n);
+    expect(vaultRent).toBeGreaterThan(0n);
+    const rentPayerBefore = lamports(ctx.rentPayer.publicKey);
+    const employerLamportsBefore = lamports(ctx.employer.publicKey);
+    const employerTokensBefore = tokenBalance(ctx.employerAta);
+
+    send([await closeIx(ctx)], [ctx.platform]);
+
+    expect(exists(ctx.vault)).toBe(false);
+    expect(exists(ctx.period)).toBe(false);
+    expect(tokenBalance(ctx.employerAta) - employerTokensBefore).toBe(dust);
+    expect(lamports(ctx.employer.publicKey) - employerLamportsBefore).toBe(
+      vaultRent,
+    );
+    expect(lamports(ctx.rentPayer.publicKey) - rentPayerBefore).toBe(
+      periodRent,
+    );
+  });
+});
+
+describe("hourly v2: marginal commission rounding", () => {
+  test("per-invoice commissions round cumulatively and sum to commission(total staged)", async () => {
+    const capNet = new BN(666_666);
+    const ctx = await openFunded({ capNet });
+    expect(tokenBalance(ctx.vault)).toBe(699_999n);
+
+    const amt = new BN(333_333);
+    const i0 = await stage(ctx, amt);
+    const i1 = await stage(ctx, amt);
+    const c0 = n(decodeInvoice(invoicePda(ctx.period, i0)).commission);
+    const c1 = n(decodeInvoice(invoicePda(ctx.period, i1)).commission);
+    expect(c0).toBe(16_666);
+    expect(c1).toBe(16_667);
+    expect(c0 + c1).toBe(n(commission(capNet)));
+
+    const p = decodePeriod(ctx.period);
+    expect(n(p.totalStagedNet)).toBe(666_666);
+    expect(n(p.outstandingCommission)).toBe(33_333);
+    expect(n(p.outstandingNet) + n(p.outstandingCommission)).toBe(699_999);
+
+    const treasuryBefore = tokenBalance(treasuryAta);
+    warpBy(REVIEW + 1);
+    send([await finalizeIx(ctx, i0)], [ctx.platform]);
+    send([await finalizeIx(ctx, i1)], [ctx.platform]);
+    expect(tokenBalance(treasuryAta) - treasuryBefore).toBe(
+      BigInt(commission(capNet).toString()),
+    );
+    expect(tokenBalance(ctx.vault)).toBe(0n);
+  });
+});
+
+describe("hourly v2 native SOL lifecycle", () => {
+  test("fund, stage, dispute+resolve, finalize, settle and close move lamports exactly", async () => {
+    const capNet = new BN(2 * LAMPORTS_PER_SOL);
+    const ctx = newCtx({ isNative: true, capNet, review: 3 * DAY });
+    await open(ctx, ctx.platform);
+
+    let p = decodePeriod(ctx.period);
+    expect(p.isNative).toBe(true);
+    expect(p.tokenMint.toBase58()).toBe(SystemProgram.programId.toBase58());
+
+    const gross = capGross(ctx);
+    const employerBeforeFund = lamports(ctx.employer.publicKey);
+    await fund(ctx);
+    expect(lamports(ctx.vault)).toBe(BigInt(gross.toString()) + RENT_RESERVE);
+    expect(employerBeforeFund - lamports(ctx.employer.publicKey)).toBe(
+      BigInt(gross.toString()) + RENT_RESERVE,
+    );
+    expect(BigInt(n(decodePeriod(ctx.period).vaultRentReserve))).toBe(
+      RENT_RESERVE,
+    );
+
+    const a0 = new BN(500_000_000);
+    const a1 = new BN(300_000_000);
+    const i0 = await stage(ctx, a0);
+    const i1 = await stage(ctx, a1);
+    expect(n(decodeInvoice(invoicePda(ctx.period, i0)).commission)).toBe(
+      n(commission(a0)),
+    );
+    expect(n(decodeInvoice(invoicePda(ctx.period, i1)).commission)).toBe(
+      n(commission(a1)),
+    );
+
+    send(
+      [await disputeIx(ctx, i0, now() + 5 * DAY, ctx.employee)],
+      [ctx.employee],
+    );
+
+    const share = new BN(200_000_000);
+    const treasuryLeg = commission(share);
+    const employerLeg = a0.sub(share).add(commission(a0).sub(treasuryLeg));
+    const employeeBefore = lamports(ctx.employee.publicKey);
+    const treasuryBefore = lamports(treasury.publicKey);
+    const employerBefore = lamports(ctx.employer.publicKey);
+    const vaultBefore = lamports(ctx.vault);
+
+    send([await resolveIx(ctx, i0, share)], [ctx.platform]);
+
+    expect(lamports(ctx.employee.publicKey) - employeeBefore).toBe(
+      BigInt(share.toString()),
+    );
+    expect(lamports(treasury.publicKey) - treasuryBefore).toBe(
+      BigInt(treasuryLeg.toString()),
+    );
+    expect(lamports(ctx.employer.publicKey) - employerBefore).toBe(
+      BigInt(employerLeg.toString()),
+    );
+    expect(vaultBefore - lamports(ctx.vault)).toBe(
+      BigInt(grossOf(a0).toString()),
+    );
+
+    const stranger = fundedKeypair();
+    const employeeBefore2 = lamports(ctx.employee.publicKey);
+    const treasuryBefore2 = lamports(treasury.publicKey);
+    warpBy(3 * DAY + 1);
+    send([await finalizeIx(ctx, i1, { caller: stranger })], [stranger]);
+    expect(lamports(ctx.employee.publicKey) - employeeBefore2).toBe(
+      BigInt(a1.toString()),
+    );
+    expect(lamports(treasury.publicKey) - treasuryBefore2).toBe(
+      BigInt(commission(a1).toString()),
+    );
+
+    expectFail([await settleIx(ctx)], [ctx.platform], "PeriodNotEnded");
+
+    warpTo(ctx.endAt + 1);
+    const vaultAtSettle = lamports(ctx.vault);
+    const employerBefore3 = lamports(ctx.employer.publicKey);
+    send([await settleIx(ctx)], [ctx.platform]);
+    expect(lamports(ctx.employer.publicKey) - employerBefore3).toBe(
+      vaultAtSettle - RENT_RESERVE,
+    );
+    expect(lamports(ctx.vault)).toBe(RENT_RESERVE);
+
+    p = decodePeriod(ctx.period);
+    expect(statusOf(p.status)).toBe("settled");
+    expect(p.liveInvoices).toBe(0);
+    expect(n(p.releasedNet)).toBe(n(share.add(a1)));
+
+    const residue = 1_000_000n;
+    svm.airdrop(ctx.vault.toBytes(), residue);
+    expect(lamports(ctx.vault)).toBe(residue + RENT_RESERVE);
+    const periodRent = lamports(ctx.period);
+    expect(periodRent).toBeGreaterThan(0n);
+    const employerBefore4 = lamports(ctx.employer.publicKey);
+    const rentPayerBefore = lamports(ctx.rentPayer.publicKey);
+
+    send([await closeIx(ctx)], [ctx.platform]);
+
+    expect(lamports(ctx.vault)).toBe(0n);
+    expect(exists(ctx.period)).toBe(false);
+    expect(lamports(ctx.employer.publicKey) - employerBefore4).toBe(
+      residue + RENT_RESERVE,
+    );
+    expect(lamports(ctx.rentPayer.publicKey) - rentPayerBefore).toBe(
+      periodRent,
+    );
+  });
+});
+
+describe("hourly v2: cross-period isolation", () => {
+  test("an invoice of period A cannot be finalized against period B", async () => {
+    const parties = newParties();
+    const a = await openFunded({ parties });
+    const b = await openFunded({ parties });
+    const i0 = await stage(a, new BN(200_000));
+    warpBy(REVIEW + 1);
+    expectFail(
+      [await finalizeIx(a, i0, { period: b.period, vault: b.vault })],
+      [a.platform],
+      "InvoicePeriodMismatch",
+    );
+  });
+});
+
+describe("hourly v2: pause invariants", () => {
+  test("pause blocks open/fund/stage/raise_cap but never blocks the payout path", async () => {
+    const ctx = newCtx({ duration: DAY, review: DAY / 2 });
+    await open(ctx, ctx.platform);
+    await fund(ctx);
+    const amt = new BN(200_000);
+    const i0 = await stage(ctx, amt);
+    const i1 = await stage(ctx, amt);
+    const i2 = await stage(ctx, amt);
+
+    const unfunded = newCtx({ parties: ctx });
+    await open(unfunded);
+    const fresh = newCtx({ parties: ctx });
 
     await setPaused(true);
+
+    expectFail([await openIx(fresh)], [fresh.employer], "ProgramPaused");
+    expectFail([await fundIx(unfunded)], [unfunded.employer], "ProgramPaused");
+    expectFail([await stageIx(ctx, amt)], [ctx.platform], "ProgramPaused");
     expectFail(
-      [await stage(ctx, new BN(100_000))],
-      [ctx.platformAuthority],
+      [await raiseCapIx(ctx, new BN(2_000_000))],
+      [ctx.employer],
       "ProgramPaused",
     );
 
-    warpBy(7 * DAY + 1);
-    send([await finalize(ctx, 0)]);
-    expect(tokenBalance(ctx.employeeAta)).toBe(BigInt("400000"));
+    send(
+      [await disputeIx(ctx, i0, now() + 3 * DAY, ctx.employer)],
+      [ctx.employer],
+    );
+    warpBy(DAY / 2 + 1);
+    send([await finalizeIx(ctx, i1)], [ctx.platform]);
+    send([await resolveIx(ctx, i0, new BN(100_000))], [ctx.platform]);
+
+    warpTo(ctx.endAt + 1);
+    send([await settleIx(ctx)], [ctx.platform]);
+    send([await finalizeIx(ctx, i2)], [ctx.platform]);
+    send([await closeIx(ctx)], [ctx.platform]);
+
+    expect(exists(ctx.period)).toBe(false);
+    expect(exists(ctx.vault)).toBe(false);
+    expect(decodePeriod(unfunded.period).fundedGross.toNumber()).toBe(0);
+
     await setPaused(false);
+  });
+});
+
+describe("hourly v2 native SOL: rent-exemption of the lamport vault", () => {
+  test("settle_period_sol keeps the rent reserve and still refunds everything else", async () => {
+    const ctx = newCtx({
+      isNative: true,
+      capNet: new BN(10_000_000),
+      review: 2 * DAY,
+    });
+    await open(ctx, ctx.platform);
+    await fund(ctx);
+    const i0 = await stage(ctx, new BN(1000));
+    const outstanding = grossOf(new BN(1000));
+    warpTo(ctx.endAt + 1);
+    const employerBefore = lamports(ctx.employer.publicKey);
+    send([await settleIx(ctx)], [ctx.platform]);
+
+    expect(lamports(ctx.employer.publicKey) - employerBefore).toBe(
+      BigInt(capGross(ctx).sub(outstanding).toString()),
+    );
+    expect(lamports(ctx.vault)).toBe(
+      RENT_RESERVE + BigInt(outstanding.toString()),
+    );
+    expect(lamports(ctx.vault)).toBeGreaterThanOrEqual(RENT_RESERVE);
+    const p = decodePeriod(ctx.period);
+    expect(statusOf(p.status)).toBe("settled");
+    expect(BigInt(n(p.vaultRentReserve))).toBe(RENT_RESERVE);
+    expect(n(p.refundedAmount)).toBe(n(capGross(ctx).sub(outstanding)));
+    expect(statusOf(decodeInvoice(invoicePda(ctx.period, i0)).status)).toBe(
+      "staged",
+    );
+  });
+
+  test("finalize_invoice_sol works for every invoice one at a time after settle", async () => {
+    const ctx = newCtx({
+      isNative: true,
+      capNet: new BN(10_000_000),
+      review: 2 * DAY,
+    });
+    await open(ctx, ctx.platform);
+    await fund(ctx);
+    const amt = new BN(476_190);
+    const i0 = await stage(ctx, amt);
+    const i1 = await stage(ctx, amt);
+    warpTo(ctx.endAt + 1);
+    send([await settleIx(ctx)], [ctx.platform]);
+    expect(lamports(ctx.vault)).toBe(
+      RENT_RESERVE + BigInt(grossOf(amt.muln(2)).toString()),
+    );
+
+    const employeeBefore = lamports(ctx.employee.publicKey);
+    const treasuryBefore = lamports(treasury.publicKey);
+    send([await finalizeIx(ctx, i0)], [ctx.platform]);
+    send([await finalizeIx(ctx, i1)], [ctx.platform]);
+
+    expect(lamports(ctx.employee.publicKey) - employeeBefore).toBe(
+      BigInt(amt.muln(2).toString()),
+    );
+    expect(lamports(treasury.publicKey) - treasuryBefore).toBe(
+      BigInt(commission(amt.muln(2)).toString()),
+    );
+    expect(lamports(ctx.vault)).toBe(RENT_RESERVE);
+    const p = decodePeriod(ctx.period);
+    expect(p.liveInvoices).toBe(0);
+    expect(n(p.outstandingNet)).toBe(0);
+    expect(n(p.outstandingCommission)).toBe(0);
+  });
+
+  test("close_period_sol sweeps the leftover rent reserve back to the employer", async () => {
+    const ctx = newCtx({
+      isNative: true,
+      capNet: new BN(10_000_000),
+      review: 2 * DAY,
+    });
+    await open(ctx, ctx.platform);
+    const employerBeforeFund = lamports(ctx.employer.publicKey);
+    await fund(ctx);
+    const amt = new BN(400_000);
+    const i0 = await stage(ctx, amt);
+    warpTo(ctx.endAt + 1);
+    send([await settleIx(ctx)], [ctx.platform]);
+    send([await finalizeIx(ctx, i0)], [ctx.platform]);
+    expect(lamports(ctx.vault)).toBe(RENT_RESERVE);
+
+    const employerBeforeClose = lamports(ctx.employer.publicKey);
+    send([await closeIx(ctx)], [ctx.platform]);
+
+    expect(exists(ctx.vault)).toBe(false);
+    expect(exists(ctx.period)).toBe(false);
+    expect(lamports(ctx.employer.publicKey) - employerBeforeClose).toBe(
+      RENT_RESERVE,
+    );
+    expect(employerBeforeFund - lamports(ctx.employer.publicKey)).toBe(
+      BigInt(grossOf(amt).toString()),
+    );
+  });
+
+  test("a native cap far below the rent-exempt minimum funds, stages and finalizes", async () => {
+    const ctx = newCtx({
+      isNative: true,
+      capNet: new BN(50_000),
+      review: DAY,
+    });
+    await open(ctx, ctx.platform);
+    const gross = capGross(ctx);
+    expect(BigInt(gross.toString())).toBeLessThan(RENT_RESERVE);
+    await fund(ctx);
+
+    expect(lamports(ctx.vault)).toBe(BigInt(gross.toString()) + RENT_RESERVE);
+    expect(BigInt(n(decodePeriod(ctx.period).vaultRentReserve))).toBe(
+      RENT_RESERVE,
+    );
+
+    const amt = new BN(50_000);
+    const i0 = await stage(ctx, amt);
+    warpBy(DAY + 1);
+    const employeeBefore = lamports(ctx.employee.publicKey);
+    const treasuryBefore = lamports(treasury.publicKey);
+    send([await finalizeIx(ctx, i0)], [ctx.platform]);
+
+    expect(lamports(ctx.employee.publicKey) - employeeBefore).toBe(
+      BigInt(amt.toString()),
+    );
+    expect(lamports(treasury.publicKey) - treasuryBefore).toBe(
+      BigInt(commission(amt).toString()),
+    );
+    expect(lamports(ctx.vault)).toBe(RENT_RESERVE);
+    expect(exists(invoicePda(ctx.period, i0))).toBe(false);
+  });
+
+  test("a native cap below the rent-exempt minimum funds only cap_gross plus one reserve", async () => {
+    const ctx = newCtx({ isNative: true, capNet: new BN(500_000) });
+    await open(ctx, ctx.platform);
+    const gross = capGross(ctx);
+    const employerBefore = lamports(ctx.employer.publicKey);
+    await fund(ctx);
+    expect(lamports(ctx.vault)).toBe(BigInt(gross.toString()) + RENT_RESERVE);
+    expect(employerBefore - lamports(ctx.employer.publicKey)).toBe(
+      BigInt(gross.toString()) + RENT_RESERVE,
+    );
+    const p = decodePeriod(ctx.period);
+    expect(n(p.fundedGross)).toBe(n(gross));
+    expect(BigInt(n(p.vaultRentReserve))).toBe(RENT_RESERVE);
+    expectFail([await fundIx(ctx)], [ctx.employer], "PeriodFullyFunded");
   });
 });

@@ -1,23 +1,28 @@
 use crate::errors::EscrowError;
-use crate::events::HourlyRemainderRefunded;
+use crate::events::HourlyPeriodSettled;
 use crate::state::*;
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 #[derive(Accounts)]
-pub struct RefundRemainder<'info> {
+pub struct SettlePeriodToken<'info> {
     #[account(
         mut,
         seeds = [HourlyPeriod::HOURLY_SEED, hourly_period.hire_id.as_ref(), &hourly_period.period_index.to_le_bytes()],
         bump = hourly_period.bump,
+        constraint = !hourly_period.is_native @ EscrowError::NotTokenEscrow,
     )]
     pub hourly_period: Box<Account<'info, HourlyPeriod>>,
 
+    #[account(constraint = token_mint.key() == hourly_period.token_mint @ EscrowError::InvalidTokenMint)]
+    pub token_mint: Box<Account<'info, Mint>>,
+
     #[account(
-        mut,
-        constraint = vault_token_account.owner == hourly_period.key() @ EscrowError::Unauthorized,
-        constraint = vault_token_account.mint == hourly_period.token_mint @ EscrowError::InvalidTokenMint,
+        init_if_needed,
+        payer = caller,
+        associated_token::mint = token_mint,
+        associated_token::authority = hourly_period,
     )]
     pub vault_token_account: Box<Account<'info, TokenAccount>>,
 
@@ -27,36 +32,35 @@ pub struct RefundRemainder<'info> {
 
     #[account(
         init_if_needed,
-        payer = signer,
+        payer = caller,
         associated_token::mint = token_mint,
         associated_token::authority = employer,
     )]
     pub employer_token_account: Box<Account<'info, TokenAccount>>,
 
-    #[account(constraint = token_mint.key() == hourly_period.token_mint @ EscrowError::InvalidTokenMint)]
-    pub token_mint: Box<Account<'info, Mint>>,
-
-    #[account(
-        mut,
-        constraint = signer.key() == hourly_period.employer
-            || signer.key() == hourly_period.platform_authority @ EscrowError::Unauthorized,
-    )]
-    pub signer: Signer<'info>,
+    #[account(mut)]
+    pub caller: Signer<'info>,
 
     pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
 }
 
-pub fn handler(ctx: Context<RefundRemainder>) -> Result<()> {
+pub fn handler(ctx: Context<SettlePeriodToken>) -> Result<()> {
+    let now = Clock::get()?.unix_timestamp;
     let vault_balance = ctx.accounts.vault_token_account.amount;
-    let period = &mut ctx.accounts.hourly_period;
+    let period = &ctx.accounts.hourly_period;
+    require!(
+        period.status != HourlyStatus::Settled,
+        EscrowError::PeriodAlreadySettled
+    );
+    require!(now >= period.period_end_at, EscrowError::PeriodNotEnded);
 
-    let liabilities = period
-        .live_liabilities()
-        .ok_or(EscrowError::InsufficientFunds)?;
+    let outstanding = period
+        .outstanding_total()
+        .ok_or(EscrowError::InvalidAmount)?;
     let refundable = vault_balance
-        .checked_sub(liabilities)
+        .checked_sub(outstanding)
         .ok_or(EscrowError::InsufficientFunds)?;
 
     if refundable > 0 {
@@ -76,7 +80,7 @@ pub fn handler(ctx: Context<RefundRemainder>) -> Result<()> {
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.employer_token_account.to_account_info(),
-                    authority: period.to_account_info(),
+                    authority: ctx.accounts.hourly_period.to_account_info(),
                 },
                 signer_seeds,
             ),
@@ -84,17 +88,21 @@ pub fn handler(ctx: Context<RefundRemainder>) -> Result<()> {
         )?;
     }
 
-    period.status = if liabilities == 0 {
-        HourlyStatus::Refunded
-    } else {
-        HourlyStatus::Settling
-    };
+    let period = &mut ctx.accounts.hourly_period;
+    period.status = HourlyStatus::Settled;
+    period.settled_at = now;
+    period.refunded_amount = period
+        .refunded_amount
+        .checked_add(refundable)
+        .ok_or(EscrowError::InvalidAmount)?;
 
-    emit!(HourlyRemainderRefunded {
+    emit!(HourlyPeriodSettled {
         hire_id: period.hire_id,
         period_index: period.period_index,
         refunded: refundable,
-        liabilities_outstanding: liabilities,
+        outstanding_net: period.outstanding_net,
+        outstanding_commission: period.outstanding_commission,
+        is_native: false,
         token_mint: period.token_mint,
     });
 

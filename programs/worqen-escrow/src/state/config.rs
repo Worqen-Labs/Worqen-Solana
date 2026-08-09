@@ -49,8 +49,15 @@ pub struct Config {
     /// PDA bump.
     pub bump: u8,
 
+    /// Canonical platform ops key (the backend hot key). Named on every
+    /// HourlyPeriod at open and pinned here so no caller can name a hostile
+    /// arbitrator or squat a period PDA. `Pubkey::default()` until set via
+    /// `update_config` (carved from `reserved`, so existing accounts read it
+    /// as default until an admin sets it).
+    pub platform_authority: Pubkey,
+
     /// Reserved padding for forward-compatible additions.
-    pub reserved: [u8; 64],
+    pub reserved: [u8; 32],
 }
 
 impl Config {
@@ -63,7 +70,8 @@ impl Config {
         + 1                    // paused
         + 4 + (MAX_ALLOWED_MINTS * 32) // allowed_mints (len prefix + max elems)
         + 1                    // bump
-        + 64; // reserved
+        + 32                   // platform_authority
+        + 32; // reserved
 
     /// True if a given mint is permitted. Native SOL is always allowed.
     pub fn is_mint_allowed(&self, mint: &Pubkey, is_native: bool) -> bool {
