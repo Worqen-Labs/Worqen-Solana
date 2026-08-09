@@ -199,9 +199,13 @@ pub struct HourlyPeriodOpened {
     pub platform_authority: Pubkey,
     pub fee_recipient: Pubkey,
     pub token_mint: Pubkey,
+    pub is_native: bool,
     pub weekly_cap_net: u64,
     pub commission_rate_bps: u16,
     pub review_window_secs: i64,
+    pub period_start_at: i64,
+    pub period_end_at: i64,
+    pub rent_payer: Pubkey,
 }
 
 #[event]
@@ -211,7 +215,7 @@ pub struct HourlyPeriodFunded {
     pub amount_funded: u64,
     pub total_funded: u64,
     pub cap_gross: u64,
-    pub via_delegate: bool,
+    pub is_native: bool,
     pub token_mint: Pubkey,
 }
 
@@ -224,58 +228,69 @@ pub struct HourlyCapRaised {
 }
 
 #[event]
-pub struct TrancheStaged {
+pub struct HourlyInvoiceStaged {
     pub hire_id: [u8; 32],
     pub period_index: u32,
-    pub tranche_index: u8,
-    pub amount: u64,
+    pub invoice_index: u16,
+    pub ref_id: [u8; 32],
+    pub amount_net: u64,
     pub commission: u64,
     pub release_at: i64,
     pub total_staged_net: u64,
-}
-
-#[event]
-pub struct TrancheFinalized {
-    pub hire_id: [u8; 32],
-    pub period_index: u32,
-    pub tranche_index: u8,
-    pub recipient: Pubkey,
-    pub amount: u64,
-    pub commission: u64,
-    pub commission_recipient: Pubkey,
-    pub forced: bool,
+    pub is_native: bool,
     pub token_mint: Pubkey,
 }
 
 #[event]
-pub struct HourlyDisputeRaised {
+pub struct HourlyInvoiceFinalized {
     pub hire_id: [u8; 32],
     pub period_index: u32,
-    pub tranche_index: u8,
-    pub raised_by: Pubkey,
-    pub raised_at: i64,
-    pub dispute_deadline: i64,
+    pub invoice_index: u16,
+    pub ref_id: [u8; 32],
+    pub recipient: Pubkey,
+    pub amount_net: u64,
+    pub commission: u64,
+    pub commission_recipient: Pubkey,
+    pub forced: bool,
+    pub is_native: bool,
+    pub token_mint: Pubkey,
 }
 
 #[event]
-pub struct HourlyTrancheResolved {
+pub struct HourlyInvoiceDisputeRaised {
     pub hire_id: [u8; 32],
     pub period_index: u32,
-    pub tranche_index: u8,
+    pub invoice_index: u16,
+    pub ref_id: [u8; 32],
+    pub raised_by: Pubkey,
+    pub raised_at: i64,
+    pub dispute_deadline: i64,
+    pub reason: Vec<u8>,
+}
+
+#[event]
+pub struct HourlyInvoiceResolved {
+    pub hire_id: [u8; 32],
+    pub period_index: u32,
+    pub invoice_index: u16,
+    pub ref_id: [u8; 32],
     pub employee_share: u64,
     pub employer_share: u64,
     pub commission_to_treasury: u64,
     pub commission_refunded: u64,
     pub forced: bool,
+    pub is_native: bool,
     pub token_mint: Pubkey,
 }
 
 #[event]
-pub struct HourlyRemainderRefunded {
+pub struct HourlyPeriodSettled {
     pub hire_id: [u8; 32],
     pub period_index: u32,
     pub refunded: u64,
-    pub liabilities_outstanding: u64,
+    pub outstanding_net: u64,
+    pub outstanding_commission: u64,
+    pub is_native: bool,
     pub token_mint: Pubkey,
 }
 
@@ -283,5 +298,7 @@ pub struct HourlyRemainderRefunded {
 pub struct HourlyPeriodClosed {
     pub hire_id: [u8; 32],
     pub period_index: u32,
-    pub tokens_swept: u64,
+    pub swept: u64,
+    pub is_native: bool,
+    pub token_mint: Pubkey,
 }

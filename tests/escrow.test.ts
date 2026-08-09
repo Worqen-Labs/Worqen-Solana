@@ -422,14 +422,14 @@ describe("config", () => {
 
   test("update_config: default commission bps persists, then restores", async () => {
     const ix1 = await program.methods
-      .updateConfig(null, 300, null, null)
+      .updateConfig(null, 300, null, null, null)
       .accountsPartial({ config: configPda, authority: payer.publicKey })
       .instruction();
     send([ix1]);
     expect(decodeConfig().defaultCommissionBps).toBe(300);
 
     const ix2 = await program.methods
-      .updateConfig(null, BPS, null, null)
+      .updateConfig(null, BPS, null, null, null)
       .accountsPartial({ config: configPda, authority: payer.publicKey })
       .instruction();
     send([ix2]);
@@ -440,7 +440,7 @@ describe("config", () => {
     const newAuth = fundedKeypair();
 
     const proposeIx = await program.methods
-      .updateConfig(null, null, null, newAuth.publicKey)
+      .updateConfig(null, null, null, newAuth.publicKey, null)
       .accountsPartial({ config: configPda, authority: payer.publicKey })
       .instruction();
     send([proposeIx]);
@@ -459,7 +459,7 @@ describe("config", () => {
 
     // restore: new authority proposes payer, payer accepts.
     const proposeBack = await program.methods
-      .updateConfig(null, null, null, payer.publicKey)
+      .updateConfig(null, null, null, payer.publicKey, null)
       .accountsPartial({ config: configPda, authority: newAuth.publicKey })
       .instruction();
     send([proposeBack], [newAuth]);
@@ -569,7 +569,7 @@ describe("config", () => {
 
   test("pause blocks new escrows; unpausing restores", async () => {
     const pauseIx = await program.methods
-      .updateConfig(null, null, true, null)
+      .updateConfig(null, null, true, null, null)
       .accountsPartial({ config: configPda, authority: payer.publicKey })
       .instruction();
     send([pauseIx]);
@@ -601,7 +601,7 @@ describe("config", () => {
     expectFail([createIx], [], "ProgramPaused");
 
     const unpauseIx = await program.methods
-      .updateConfig(null, null, false, null)
+      .updateConfig(null, null, false, null, null)
       .accountsPartial({ config: configPda, authority: payer.publicKey })
       .instruction();
     send([unpauseIx]);

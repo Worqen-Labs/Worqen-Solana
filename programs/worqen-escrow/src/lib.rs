@@ -18,7 +18,7 @@ security_txt! {
     policy: "https://github.com/Worqen-Labs/Worqen-Solana/blob/master/SECURITY.md",
     preferred_languages: "en",
     source_code: "https://github.com/Worqen-Labs/Worqen-Solana",
-    source_release: "v1.1.0",
+    source_release: "v1.2.0",
     auditors: "Pending external audit"
 }
 
@@ -29,7 +29,7 @@ security_txt! {
 #[cfg(feature = "mainnet")]
 declare_id!("HShWcYbT6wGrndgauQxNrcNJuJQ1BX9CVZqFSn9Q7rNs");
 #[cfg(not(feature = "mainnet"))]
-declare_id!("6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ");
+declare_id!("FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh");
 
 /// Trustless payment escrow for the Worqen job marketplace (native SOL and an
 /// allowlisted set of SPL tokens). Employers lock funds when hiring; employees
@@ -63,6 +63,7 @@ pub mod worqen_escrow {
         new_default_commission_bps: Option<u16>,
         new_paused: Option<bool>,
         new_pending_authority: Option<Pubkey>,
+        new_platform_authority: Option<Pubkey>,
     ) -> Result<()> {
         instructions::config::update_config(
             ctx,
@@ -70,6 +71,7 @@ pub mod worqen_escrow {
             new_default_commission_bps,
             new_paused,
             new_pending_authority,
+            new_platform_authority,
         )
     }
 
@@ -311,6 +313,10 @@ pub mod worqen_escrow {
         instructions::mutual_cancel_token::handler(ctx, employee_share)
     }
 
+    /// Open a weekly hourly period (employer or platform signs and pays rent).
+    /// The backend computes the hire-anchored week window and money cap
+    /// (hours x rate) off-chain; the program enforces the window it is given.
+    #[allow(clippy::too_many_arguments)]
     pub fn open_period(
         ctx: Context<OpenPeriod>,
         hire_id: [u8; 32],
@@ -318,6 +324,9 @@ pub mod worqen_escrow {
         weekly_cap_net: u64,
         commission_rate_bps: u16,
         review_window_secs: i64,
+        period_start_at: i64,
+        period_duration_secs: i64,
+        is_native: bool,
     ) -> Result<()> {
         instructions::open_period::handler(
             ctx,
@@ -326,58 +335,118 @@ pub mod worqen_escrow {
             weekly_cap_net,
             commission_rate_bps,
             review_window_secs,
+            period_start_at,
+            period_duration_secs,
+            is_native,
         )
     }
 
-    pub fn fund_period(ctx: Context<FundPeriod>) -> Result<()> {
-        instructions::fund_period::handler(ctx)
+    /// Top up the native-SOL period vault to `cap_gross` (employer signs).
+    /// `max_fund_amount` bounds the debit so a mid-flight `raise_weekly_cap`
+    /// cannot drain more than the employer approved.
+    pub fn fund_period_sol(ctx: Context<FundPeriodSol>, max_fund_amount: u64) -> Result<()> {
+        instructions::fund_period_sol::handler(ctx, max_fund_amount)
     }
 
-    pub fn pull_fund_period(ctx: Context<PullFundPeriod>) -> Result<()> {
-        instructions::pull_fund_period::handler(ctx)
+    /// Token variant of `fund_period_sol`; creates the vault ATA on first fund.
+    pub fn fund_period_token(ctx: Context<FundPeriodToken>, max_fund_amount: u64) -> Result<()> {
+        instructions::fund_period_token::handler(ctx, max_fund_amount)
     }
 
+    /// Raise the weekly cap mid-week (employer or platform signs). Monotonic;
+    /// moves no money — follow with a fund call for the delta.
     pub fn raise_weekly_cap(ctx: Context<RaiseWeeklyCap>, new_weekly_cap_net: u64) -> Result<()> {
         instructions::raise_weekly_cap::handler(ctx, new_weekly_cap_net)
     }
 
-    pub fn stage_tranche(ctx: Context<StageTranche>, amount: u64) -> Result<()> {
-        instructions::stage_tranche::handler(ctx, amount)
+    /// Stage an invoice as its own PDA inside the period window (platform
+    /// signs, pays invoice rent). Solvency- and cap-checked.
+    pub fn stage_invoice_sol(
+        ctx: Context<StageInvoiceSol>,
+        amount_net: u64,
+        ref_id: [u8; 32],
+    ) -> Result<()> {
+        instructions::stage_invoice_sol::handler(ctx, amount_net, ref_id)
     }
 
-    pub fn finalize_tranche(ctx: Context<FinalizeTranche>, index: u8) -> Result<()> {
-        instructions::finalize_tranche::handler(ctx, index)
+    /// Token variant of `stage_invoice_sol`.
+    pub fn stage_invoice_token(
+        ctx: Context<StageInvoiceToken>,
+        amount_net: u64,
+        ref_id: [u8; 32],
+    ) -> Result<()> {
+        instructions::stage_invoice_token::handler(ctx, amount_net, ref_id)
     }
 
-    pub fn raise_hourly_dispute(
-        ctx: Context<RaiseHourlyDispute>,
-        index: u8,
+    /// Dispute a staged invoice before its release time (employer, employee,
+    /// or platform signs). `dispute_deadline` is the permissionless
+    /// force-release long-stop, bounded to [now + 3d, now + 90d].
+    pub fn raise_invoice_dispute(
+        ctx: Context<RaiseInvoiceDispute>,
         dispute_deadline: i64,
         reason: Vec<u8>,
     ) -> Result<()> {
-        instructions::raise_hourly_dispute::handler(ctx, index, dispute_deadline, reason)
+        instructions::raise_invoice_dispute::handler(ctx, dispute_deadline, reason)
     }
 
-    pub fn resolve_hourly_tranche(
-        ctx: Context<ResolveHourlyTranche>,
-        index: u8,
+    /// Permissionless payout of an undisputed invoice after its review window:
+    /// net to the worker, commission to the treasury, invoice rent reclaimed.
+    pub fn finalize_invoice_sol(ctx: Context<FinalizeInvoiceSol>) -> Result<()> {
+        instructions::finalize_invoice_sol::handler(ctx)
+    }
+
+    /// Token variant of `finalize_invoice_sol`.
+    pub fn finalize_invoice_token(ctx: Context<FinalizeInvoiceToken>) -> Result<()> {
+        instructions::finalize_invoice_token::handler(ctx)
+    }
+
+    /// Platform resolves a disputed invoice with a split; commission is
+    /// pro-rated on the worker share, the excess refunds to the employer.
+    pub fn resolve_invoice_sol(
+        ctx: Context<ResolveInvoiceSol>,
         employee_share: u64,
     ) -> Result<()> {
-        instructions::resolve_hourly_tranche::handler(ctx, index, employee_share)
+        instructions::resolve_invoice_sol::handler(ctx, employee_share)
     }
 
-    pub fn trigger_hourly_auto_release(
-        ctx: Context<TriggerHourlyAutoRelease>,
-        index: u8,
+    /// Token variant of `resolve_invoice_sol`.
+    pub fn resolve_invoice_token(
+        ctx: Context<ResolveInvoiceToken>,
+        employee_share: u64,
     ) -> Result<()> {
-        instructions::trigger_hourly_auto_release::handler(ctx, index)
+        instructions::resolve_invoice_token::handler(ctx, employee_share)
     }
 
-    pub fn refund_remainder(ctx: Context<RefundRemainder>) -> Result<()> {
-        instructions::refund_remainder::handler(ctx)
+    /// Permissionless force-release of a disputed invoice after its
+    /// long-stop deadline — the platform-failure safety net.
+    pub fn auto_release_invoice_sol(ctx: Context<AutoReleaseInvoiceSol>) -> Result<()> {
+        instructions::auto_release_invoice_sol::handler(ctx)
     }
 
-    pub fn close_period(ctx: Context<ClosePeriod>) -> Result<()> {
-        instructions::close_period::handler(ctx)
+    /// Token variant of `auto_release_invoice_sol`.
+    pub fn auto_release_invoice_token(ctx: Context<AutoReleaseInvoiceToken>) -> Result<()> {
+        instructions::auto_release_invoice_token::handler(ctx)
+    }
+
+    /// Permissionless week-boundary settlement: refunds `vault - outstanding`
+    /// to the employer; live invoices keep their money until resolved.
+    pub fn settle_period_sol(ctx: Context<SettlePeriodSol>) -> Result<()> {
+        instructions::settle_period_sol::handler(ctx)
+    }
+
+    /// Token variant of `settle_period_sol`.
+    pub fn settle_period_token(ctx: Context<SettlePeriodToken>) -> Result<()> {
+        instructions::settle_period_token::handler(ctx)
+    }
+
+    /// Permissionless rent reclamation once a settled period has no live
+    /// invoices; sweeps vault residue to the employer.
+    pub fn close_period_sol(ctx: Context<ClosePeriodSol>) -> Result<()> {
+        instructions::close_period_sol::handler(ctx)
+    }
+
+    /// Token variant of `close_period_sol`; also closes the vault ATA.
+    pub fn close_period_token(ctx: Context<ClosePeriodToken>) -> Result<()> {
+        instructions::close_period_token::handler(ctx)
     }
 }

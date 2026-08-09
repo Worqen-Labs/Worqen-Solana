@@ -2,16 +2,11 @@ use crate::errors::EscrowError;
 use crate::events::HourlyPeriodOpened;
 use crate::state::*;
 use anchor_lang::prelude::*;
-use anchor_spl::associated_token::AssociatedToken;
-use anchor_spl::token::{Mint, Token, TokenAccount};
 
 #[derive(Accounts)]
 #[instruction(
     hire_id: [u8; 32],
     period_index: u32,
-    weekly_cap_net: u64,
-    commission_rate_bps: u16,
-    review_window_secs: i64
 )]
 pub struct OpenPeriod<'info> {
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
@@ -19,57 +14,41 @@ pub struct OpenPeriod<'info> {
 
     #[account(
         init,
-        payer = payer,
+        payer = authorizer,
         space = HourlyPeriod::SPACE,
         seeds = [HourlyPeriod::HOURLY_SEED, hire_id.as_ref(), &period_index.to_le_bytes()],
         bump
     )]
     pub hourly_period: Box<Account<'info, HourlyPeriod>>,
 
-    /// CHECK: stored only
+    /// CHECK: stored only; authorizer is constrained against it
     pub employer: UncheckedAccount<'info>,
 
     /// CHECK: stored only
     pub employee: UncheckedAccount<'info>,
 
-    /// CHECK: stored only
+    /// CHECK: pinned to config.platform_authority so no caller can name a
+    /// hostile arbitrator; must be set on Config before any period can open.
+    #[account(
+        constraint = platform_authority.key() == config.platform_authority
+            && config.platform_authority != Pubkey::default() @ EscrowError::InvalidPlatformAuthority,
+    )]
     pub platform_authority: UncheckedAccount<'info>,
 
     /// CHECK: matched against config.fee_recipient
     #[account(constraint = fee_recipient.key() == config.fee_recipient @ EscrowError::InvalidFeeRecipient)]
     pub fee_recipient: UncheckedAccount<'info>,
 
-    pub token_mint: Box<Account<'info, Mint>>,
+    /// CHECK: validated against is_native and the config allowlist in the handler
+    pub token_mint: UncheckedAccount<'info>,
 
     #[account(
-        init_if_needed,
-        payer = payer,
-        associated_token::mint = token_mint,
-        associated_token::authority = hourly_period,
+        mut,
+        constraint = authorizer.key() == employer.key()
+            || authorizer.key() == platform_authority.key() @ EscrowError::Unauthorized,
     )]
-    pub vault_token_account: Box<Account<'info, TokenAccount>>,
+    pub authorizer: Signer<'info>,
 
-    #[account(
-        init_if_needed,
-        payer = payer,
-        associated_token::mint = token_mint,
-        associated_token::authority = employee,
-    )]
-    pub employee_token_account: Box<Account<'info, TokenAccount>>,
-
-    #[account(
-        init_if_needed,
-        payer = payer,
-        associated_token::mint = token_mint,
-        associated_token::authority = fee_recipient,
-    )]
-    pub platform_token_account: Box<Account<'info, TokenAccount>>,
-
-    #[account(mut)]
-    pub payer: Signer<'info>,
-
-    pub token_program: Program<'info, Token>,
-    pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
 }
 
@@ -81,12 +60,26 @@ pub fn handler(
     weekly_cap_net: u64,
     commission_rate_bps: u16,
     review_window_secs: i64,
+    period_start_at: i64,
+    period_duration_secs: i64,
+    is_native: bool,
 ) -> Result<()> {
     require!(!ctx.accounts.config.paused, EscrowError::ProgramPaused);
 
     let token_mint_key = ctx.accounts.token_mint.key();
+    if is_native {
+        require!(
+            token_mint_key == anchor_lang::system_program::ID,
+            EscrowError::IsNativeMintMismatch
+        );
+    } else {
+        require!(
+            token_mint_key != anchor_lang::system_program::ID,
+            EscrowError::IsNativeMintMismatch
+        );
+    }
     require!(
-        ctx.accounts.config.is_mint_allowed(&token_mint_key, false),
+        ctx.accounts.config.is_mint_allowed(&token_mint_key, is_native),
         EscrowError::MintNotAllowed
     );
     require!(weekly_cap_net > 0, EscrowError::InvalidAmount);
@@ -112,7 +105,32 @@ pub fn handler(
     );
 
     let clock = Clock::get()?;
+    let now = clock.unix_timestamp;
+    require!(
+        (HourlyPeriod::MIN_PERIOD_DURATION_SECS..=HourlyPeriod::MAX_PERIOD_DURATION_SECS)
+            .contains(&period_duration_secs),
+        EscrowError::InvalidPeriodWindow
+    );
+    require!(period_start_at > 0, EscrowError::InvalidPeriodWindow);
+    let period_end_at = period_start_at
+        .checked_add(period_duration_secs)
+        .ok_or(EscrowError::InvalidPeriodWindow)?;
+    require!(period_end_at > now, EscrowError::PeriodEnded);
+    require!(
+        period_start_at <= now + HourlyPeriod::MAX_PERIOD_DURATION_SECS,
+        EscrowError::InvalidPeriodWindow
+    );
+
+    let (_, vault_bump) = Pubkey::find_program_address(
+        &[
+            Escrow::VAULT_SEED,
+            ctx.accounts.hourly_period.key().as_ref(),
+        ],
+        ctx.program_id,
+    );
+
     let fee_recipient_key = ctx.accounts.config.fee_recipient;
+    let rent_payer_key = ctx.accounts.authorizer.key();
     let period = &mut ctx.accounts.hourly_period;
     period.version = HOURLY_PERIOD_VERSION;
     period.hire_id = hire_id;
@@ -122,20 +140,27 @@ pub fn handler(
     period.platform_authority = platform_key;
     period.fee_recipient = fee_recipient_key;
     period.token_mint = token_mint_key;
+    period.is_native = is_native;
     period.bump = ctx.bumps.hourly_period;
-    period.vault_bump = 0;
+    period.vault_bump = vault_bump;
+    period.rent_payer = rent_payer_key;
     period.weekly_cap_net = weekly_cap_net;
     period.commission_rate_bps = commission_rate_bps;
-    period.funded_amount = 0;
-    period.released_net = 0;
+    period.funded_gross = 0;
     period.total_staged_net = 0;
-    period.tranches = [Tranche::default(); 7];
-    period.tranche_count = 0;
+    period.released_net = 0;
+    period.refunded_amount = 0;
+    period.outstanding_net = 0;
+    period.outstanding_commission = 0;
+    period.vault_rent_reserve = 0;
+    period.invoice_count = 0;
+    period.live_invoices = 0;
     period.review_window_secs = review_window_secs;
-    period.created_at = clock.unix_timestamp;
+    period.period_start_at = period_start_at;
+    period.period_end_at = period_end_at;
+    period.created_at = now;
     period.funded_at = 0;
-    period.period_end_at = clock.unix_timestamp + HourlyPeriod::DEFAULT_REVIEW_WINDOW_SECS;
-    period.completed_at = 0;
+    period.settled_at = 0;
     period.status = HourlyStatus::Open;
     period.reserved = [0u8; 64];
 
@@ -147,9 +172,13 @@ pub fn handler(
         platform_authority: platform_key,
         fee_recipient: fee_recipient_key,
         token_mint: token_mint_key,
+        is_native,
         weekly_cap_net,
         commission_rate_bps,
         review_window_secs,
+        period_start_at,
+        period_end_at,
+        rent_payer: rent_payer_key,
     });
 
     Ok(())

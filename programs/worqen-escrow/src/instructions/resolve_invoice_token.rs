@@ -1,19 +1,27 @@
 use crate::errors::EscrowError;
-use crate::events::HourlyTrancheResolved;
+use crate::events::HourlyInvoiceResolved;
 use crate::state::*;
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 #[derive(Accounts)]
-pub struct ResolveHourlyTranche<'info> {
+pub struct ResolveInvoiceToken<'info> {
     #[account(
         mut,
         seeds = [HourlyPeriod::HOURLY_SEED, hourly_period.hire_id.as_ref(), &hourly_period.period_index.to_le_bytes()],
         bump = hourly_period.bump,
+        constraint = !hourly_period.is_native @ EscrowError::NotTokenEscrow,
         constraint = hourly_period.platform_authority == platform_authority.key() @ EscrowError::Unauthorized,
     )]
     pub hourly_period: Box<Account<'info, HourlyPeriod>>,
+
+    #[account(
+        mut,
+        close = rent_payer,
+        constraint = invoice.period == hourly_period.key() @ EscrowError::InvoicePeriodMismatch,
+    )]
+    pub invoice: Box<Account<'info, HourlyInvoice>>,
 
     #[account(constraint = token_mint.key() == hourly_period.token_mint @ EscrowError::InvalidTokenMint)]
     pub token_mint: Box<Account<'info, Mint>>,
@@ -54,11 +62,19 @@ pub struct ResolveHourlyTranche<'info> {
     pub fee_recipient: UncheckedAccount<'info>,
 
     #[account(
-        mut,
-        constraint = platform_token_account.owner == hourly_period.fee_recipient @ EscrowError::Unauthorized,
-        constraint = platform_token_account.mint == hourly_period.token_mint @ EscrowError::InvalidTokenMint,
+        init_if_needed,
+        payer = platform_authority,
+        associated_token::mint = token_mint,
+        associated_token::authority = fee_recipient,
     )]
     pub platform_token_account: Box<Account<'info, TokenAccount>>,
+
+    /// CHECK: matched against invoice.rent_payer; receives invoice rent
+    #[account(
+        mut,
+        constraint = rent_payer.key() == invoice.rent_payer @ EscrowError::Unauthorized,
+    )]
+    pub rent_payer: UncheckedAccount<'info>,
 
     #[account(mut)]
     pub platform_authority: Signer<'info>,
@@ -68,41 +84,41 @@ pub struct ResolveHourlyTranche<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn handler(ctx: Context<ResolveHourlyTranche>, index: u8, employee_share: u64) -> Result<()> {
-    let idx = index as usize;
-    let period = &mut ctx.accounts.hourly_period;
+pub fn handler(ctx: Context<ResolveInvoiceToken>, employee_share: u64) -> Result<()> {
+    let invoice = &ctx.accounts.invoice;
     require!(
-        idx < period.tranche_count as usize,
-        EscrowError::InvalidTrancheIndex
-    );
-    let t = period.tranches[idx];
-    require!(
-        t.status == TrancheStatus::Disputed,
-        EscrowError::TrancheNotDisputed
+        invoice.status == InvoiceStatus::Disputed,
+        EscrowError::InvoiceNotDisputed
     );
     require!(
-        employee_share <= t.amount,
-        EscrowError::HourlyEmployeeShareExceedsTranche
+        employee_share <= invoice.amount_net,
+        EscrowError::EmployeeShareExceedsInvoice
     );
 
-    let commission_on_share =
-        Escrow::calculate_commission(employee_share, period.commission_rate_bps);
-    let treasury_leg = commission_on_share.min(t.commission);
-    let employer_worker_share = t
-        .amount
+    let amount_net = invoice.amount_net;
+    let commission = invoice.commission;
+    let invoice_index = invoice.invoice_index;
+    let ref_id = invoice.ref_id;
+
+    let commission_on_share = Escrow::calculate_commission(
+        employee_share,
+        ctx.accounts.hourly_period.commission_rate_bps,
+    );
+    let treasury_leg = commission_on_share.min(commission);
+    let employer_worker_share = amount_net
         .checked_sub(employee_share)
         .ok_or(EscrowError::InvalidAmount)?;
     let employer_leg = employer_worker_share
         .checked_add(
-            t.commission
+            commission
                 .checked_sub(treasury_leg)
                 .ok_or(EscrowError::InvalidAmount)?,
         )
         .ok_or(EscrowError::InvalidAmount)?;
 
-    let hire_id = period.hire_id;
-    let bump = period.bump;
-    let idx_le = period.period_index.to_le_bytes();
+    let hire_id = ctx.accounts.hourly_period.hire_id;
+    let bump = ctx.accounts.hourly_period.bump;
+    let idx_le = ctx.accounts.hourly_period.period_index.to_le_bytes();
     let period_seeds = &[
         HourlyPeriod::HOURLY_SEED,
         hire_id.as_ref(),
@@ -118,7 +134,7 @@ pub fn handler(ctx: Context<ResolveHourlyTranche>, index: u8, employee_share: u6
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.employee_token_account.to_account_info(),
-                    authority: period.to_account_info(),
+                    authority: ctx.accounts.hourly_period.to_account_info(),
                 },
                 signer_seeds,
             ),
@@ -132,7 +148,7 @@ pub fn handler(ctx: Context<ResolveHourlyTranche>, index: u8, employee_share: u6
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.platform_token_account.to_account_info(),
-                    authority: period.to_account_info(),
+                    authority: ctx.accounts.hourly_period.to_account_info(),
                 },
                 signer_seeds,
             ),
@@ -146,7 +162,7 @@ pub fn handler(ctx: Context<ResolveHourlyTranche>, index: u8, employee_share: u6
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.employer_token_account.to_account_info(),
-                    authority: period.to_account_info(),
+                    authority: ctx.accounts.hourly_period.to_account_info(),
                 },
                 signer_seeds,
             ),
@@ -154,21 +170,22 @@ pub fn handler(ctx: Context<ResolveHourlyTranche>, index: u8, employee_share: u6
         )?;
     }
 
-    period.tranches[idx].status = TrancheStatus::Resolved;
-    period.released_net = period
-        .released_net
-        .checked_add(employee_share)
+    let period = &mut ctx.accounts.hourly_period;
+    period
+        .register_settled_invoice(amount_net, commission, employee_share)
         .ok_or(EscrowError::InvalidAmount)?;
 
-    emit!(HourlyTrancheResolved {
+    emit!(HourlyInvoiceResolved {
         hire_id: period.hire_id,
         period_index: period.period_index,
-        tranche_index: index,
+        invoice_index,
+        ref_id,
         employee_share,
         employer_share: employer_worker_share,
         commission_to_treasury: treasury_leg,
-        commission_refunded: t.commission - treasury_leg,
+        commission_refunded: commission - treasury_leg,
         forced: false,
+        is_native: false,
         token_mint: period.token_mint,
     });
 
