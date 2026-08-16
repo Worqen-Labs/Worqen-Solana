@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Worqen Escrow \u2014 devnet deployment manifest. Canonical source for the program ID, upgrade authority, Config PDA, and keypair paths used by CI/deploy scripts and off-chain services. worqen-escrow v1.2.0 (Hourly v2).",
+  "description": "Worqen Escrow — devnet deployment manifest. Canonical source for the program ID, upgrade authority, Config PDA, and keypair paths used by CI/deploy scripts and off-chain services. worqen-escrow v1.3.0 (Hourly v2 + instant invoice approval).",
   "network": "devnet",
   "cluster_rpc": "https://api.devnet.solana.com",
   "explorer": {
@@ -15,7 +15,7 @@
     "anchor_version": "0.32.1",
     "keypair_path": "~/.config/solana/worqen-escrow-v2-program.json",
     "so_path": "target/deploy/worqen_escrow.so",
-    "data_length_bytes": 1023952,
+    "data_length_bytes": 1103952,
     "programdata_address": "5dGNYXHqDNk83Hch1MUPKGx3CviFcWX5cPKQFHFiZQcw",
     "bpf_loader": "BPFLoaderUpgradeab1e11111111111111111111111"
   },
@@ -45,8 +45,8 @@
   "idl": {
     "source_of_truth": "target/idl/worqen_escrow.json",
     "typescript_types": "target/types/worqen_escrow.ts",
-    "frontend_copy": "frontend/apps/dashboard/lib/solana-wallet/idl/worqen_escrow.json",
-    "onchain_idl_account": "9TdbF5SFg5SQxyMfMAqtTU32FKUMFGCrocSQmAcvfiqb"
+    "frontend_copy": "frontend/apps/dashboard/lib/solana-wallet/generated/ (codama client, regenerate via bun run generate:client)",
+    "onchain_idl_account": "2Y1y1m4cEsNT88srWa7k3EkkHXKENT982dKNVyS64aYo"
   },
   "design": {
     "commission_model": "fee-on-top: employer deposits amount + commission; the employee receives the full `amount`; commission is routed to the Config `fee_recipient` treasury (NOT the platform_authority signing key).",
@@ -60,15 +60,27 @@
       "min": 259200,
       "max": 7776000
     },
-    "instruction_count": 50,
+    "instruction_count": 52,
     "key_roles": {
       "upgrade_authority": "deploy new bytecode (mainnet: multisig)",
-      "config_authority": "Config.authority \u2014 pause, allowlist, default fee, treasury (mainnet: multisig; two-step handoff via update_config+accept_authority)",
+      "config_authority": "Config.authority — pause, allowlist, default fee, treasury (mainnet: multisig; two-step handoff via update_config+accept_authority)",
       "fee_recipient": "treasury, receives all commission, never signs (cold)",
       "platform_authority": "per-escrow hot ops key (backend): resolve disputes, force-release, auto-release"
     }
   },
   "deployment_history": [
+    {
+      "version": "v1.3.0",
+      "deployed_slot": 484457826,
+      "deploy_tx": "5LqUvC4Gh413Yjnbz119AF6JZrh9PXSCkqfar5GxPT8HkrJhzLZz4SyPmuCG7kmuhqLiHMLCoUphuhNoBjqo5FPJ",
+      "deployed_at": "2026-08-16",
+      "notes": [
+        "approve_invoice_sol / approve_invoice_token: employer- or platform-signed instant release of a Staged hourly invoice (skips the remaining review window; gated on !config.paused; no time gate).",
+        "New event HourlyInvoiceApproved. Instruction count 50 -> 52, events 23 -> 24. No state layout changes; purely additive upgrade.",
+        "Program account extended by 80000 bytes (1023952 -> 1103952) to fit the larger binary.",
+        "On-chain IDL account initialized for the first time on this program id: 2Y1y1m4cEsNT88srWa7k3EkkHXKENT982dKNVyS64aYo."
+      ]
+    },
     {
       "version": "v1.2.0",
       "deployed_slot": 482114923,
@@ -76,10 +88,10 @@
       "deployed_at": "2026-08-08",
       "notes": [
         "Hourly v2: per-invoice HourlyInvoice PDAs replace the fixed [Tranche;7] array (unlimited invoices/week); money-cap HourlyPeriod v2 with hire-anchored week window (period_start_at/period_end_at); native SOL + SPL _sol/_token instruction pairs; permissionless finalize/settle/close; 50 instructions.",
-        "NEW PROGRAM ID FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh (could not upgrade 6Ftag in place \u2014 original upgrade authority key was lost with the macOS checkout).",
-        "Security fixes (adversarial review): (1) Config.platform_authority pins the named platform on open_period (was vacuously authorized \u2014 squat/hostile-arbitrator DoS); (2) fund_period_sol/token gained max_fund_amount to block a raise_weekly_cap front-run; (3) native SOL vault_rent_reserve seeded on first fund so partial payouts never strand the vault below the rent-exempt minimum.",
+        "NEW PROGRAM ID FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh (could not upgrade 6Ftag in place — original upgrade authority key was lost with the macOS checkout).",
+        "Security fixes (adversarial review): (1) Config.platform_authority pins the named platform on open_period (was vacuously authorized — squat/hostile-arbitrator DoS); (2) fund_period_sol/token gained max_fund_amount to block a raise_weekly_cap front-run; (3) native SOL vault_rent_reserve seeded on first fund so partial payouts never strand the vault below the rent-exempt minimum.",
         "Verified: 74/74 LiteSVM tests + full backend-builder integration E2E on a live validator (identical bytecode).",
-        "ACCOUNT SCHEMA v2 \u2014 old 6Ftag hourly accounts are incompatible; this is a fresh program, no migration."
+        "ACCOUNT SCHEMA v2 — old 6Ftag hourly accounts are incompatible; this is a fresh program, no migration."
       ]
     },
     {
@@ -88,9 +100,9 @@
       "deploy_tx": "3cBcWi56i1ichvT73hAY8tgUFHtvbcu4qnzc2KcmwqF71pir1A21opoTLTm94tbqmo3rA6c6JH5WZrZBrXQDN2xC",
       "deployed_at": "2026-05-29",
       "notes": [
-        "Worqen Escrow v1.0.0 \u2014 initial release (ESCROW_ACCOUNT_VERSION = 1).",
+        "Worqen Escrow v1.0.0 — initial release (ESCROW_ACCOUNT_VERSION = 1).",
         "New global Config PDA: mint allowlist, pause kill-switch (blocks only new create/deposit/direct-pay, never release/dispute/close), treasury fee_recipient, default commission. Instructions: init_config, update_config, accept_authority, add_allowed_mint, remove_allowed_mint.",
-        "Commission is now FEE-ON-TOP and routed to a dedicated treasury (fee_recipient), snapshotted per escrow at create \u2014 decoupled from the platform_authority signing key.",
+        "Commission is now FEE-ON-TOP and routed to a dedicated treasury (fee_recipient), snapshotted per escrow at create — decoupled from the platform_authority signing key.",
         "Tier-0 security fix: mandatory MINIMUM dispute window (3 days) so a worker can no longer self-dispute and instantly force-release; on-chain deadline bounded to [now+3d, now+90d].",
         "Account additions: escrow_kind (u8), fee_recipient (Pubkey), terms_hash ([u8;32]), reserved ([u8;64]). Event additions: ref_id on EscrowReleased, fee_recipient/escrow_kind/terms_hash on EscrowCreated, ConfigUpdated + MintAllowlistChanged; DirectPaymentMade switched to fee-on-top fields.",
         "Hardening: cancel events report actual remaining amounts; update_platform_authority rejects no-op rotation; close_unfunded_escrow_sol/_token reclaim rent on never-funded escrows; total_deposit() now returns a checked Result.",
