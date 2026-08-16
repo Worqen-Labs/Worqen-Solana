@@ -56,10 +56,10 @@ amount_net u64, commission u64 (marginal, cumulative-rounded), staged_at i64, re
 dispute_deadline i64 (0 = none), disputed_by Pubkey, status (Staged | Disputed),
 rent_payer Pubkey (stage signer = platform), bump u8, reserved [u8;32].
 
-Invoice accounts are closed at finalize/resolve/auto-release (rent back to rent_payer);
+Invoice accounts are closed at finalize/approve/resolve/auto-release (rent back to rent_payer);
 terminal history lives in events + backend.
 
-## Instructions (17, replacing v1's 10; `pull_fund_period` and the global
+## Instructions (19, replacing v1's 10; `pull_fund_period` and the global
 `delegate_auth` PDA are removed)
 
 | ix | signer | gates |
@@ -70,12 +70,13 @@ terminal history lives in events + backend.
 | stage_invoice_sol / _token | platform (pays invoice rent) | not paused; status Funded/Active; period_start <= now < period_end; cap check; solvency: outstanding + new amount+commission <= actual vault balance; init invoice PDA at invoice_count |
 | raise_invoice_dispute | employer OR employee OR platform | invoice Staged; now < release_at; deadline in [now+3d, now+90d]; reason <= 256 bytes (event only) |
 | finalize_invoice_sol / _token | anyone | invoice Staged; now >= release_at; pays net -> employee, commission -> treasury; closes invoice |
+| approve_invoice_sol / _token | employer OR platform | not paused; invoice Staged; NO time gate (instant release, skips remaining review window); pays net -> employee, commission -> treasury; closes invoice; emits HourlyInvoiceApproved |
 | resolve_invoice_sol / _token | platform | invoice Disputed; employee_share <= amount_net; pro-rata commission to treasury (capped at invoice.commission), excess commission + employer share -> employer; closes invoice |
 | auto_release_invoice_sol / _token | anyone | invoice Disputed; now >= dispute_deadline != 0; full amount -> employee, commission -> treasury; closes invoice |
 | settle_period_sol / _token | anyone | now >= period_end_at; status != Settled; refund `vault - outstanding` -> employer; status = Settled |
 | close_period_sol / _token | anyone | status Settled; live_invoices == 0; sweep vault dust -> employer; close vault (token: CloseAccount; native: drain); close period -> rent to rent_payer |
 
-Counter updates: stage `+outstanding/+live/+staged/+count`; finalize/resolve/auto-release
+Counter updates: stage `+outstanding/+live/+staged/+count`; finalize/approve/resolve/auto-release
 `-outstanding/-live`, `+released_net` (by worker-paid amount). All math checked.
 
 ## Native SOL handling

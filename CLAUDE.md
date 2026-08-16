@@ -4,12 +4,11 @@ Worqen on-chain escrow program. Anchor/Rust. This checkout's GitHub home is `Wor
 
 ## What this program does
 
-Escrow for the Worqen marketplace: fixed-price escrows (native SOL + SPL tokens: USDC, USDT, EURC), milestone escrows, and hourly GWS (`HourlyPeriod`, 11 instructions) — pre-funded weekly escrow with ≤7 frozen 7-day tranches per week and permissionless finalize. v1.1.0 retains commission handling.
+Escrow for the Worqen marketplace: fixed-price escrows (native SOL + SPL tokens: USDC, USDT, EURC), milestone escrows, and hourly v2 (`HourlyPeriod` + per-invoice `HourlyInvoice` PDAs, 19 instructions) — pre-funded weekly escrow; each invoice gets a 7-day review window with permissionless finalize, employer/platform instant approve (approve_invoice_*), and either-party dispute. v1.3.0.
 
 ## Working here
 
 - `Anchor.toml` / `Makefile` / `scripts/` drive build + test; `tests/` is the TS test suite; `devnet-deployment.json` records the devnet deploy.
-- Frontend consumes this program via `frontend/apps/dashboard/lib/solana-wallet/` (IDL copy at `lib/solana-wallet/idl/worqen_escrow.ts` — regenerate/copy after program changes or the frontend types lie).
 - The frontend `@solana/kit` client at `frontend/apps/dashboard/lib/solana-wallet/generated/` is codama-generated from `target/idl/worqen_escrow.json` — rerun `bun run generate:client` after every program change.
 - Backend submits/verifies via its Solana service layer; escrow state transitions must stay in sync with `backend` enums.
 - The generic `/solana-dev` skill covers Anchor/testing patterns; `SECURITY.md` lists program-specific invariants.

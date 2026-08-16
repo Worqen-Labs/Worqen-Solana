@@ -126,10 +126,24 @@ than by code (the platform fee no longer depends on the dispute outcome).
 
 The Config PDA carries a `paused` flag. When set, the program rejects every
 instruction that brings *new* money into the system — `create_escrow`,
-`deposit_*`, and `pay_with_commission_*` (incl. the batch variants). It can
-**never** block `release`, `confirm`, `dispute`, `resolve`, `auto_release`,
-`close`, or `mutual_cancel`. Pausing therefore halts intake without ever
-stranding funds already in escrow — every party can still withdraw.
+`deposit_*`, `pay_with_commission_*` (incl. the batch variants), `open_period`,
+`fund_period_*`, and `raise_weekly_cap` — plus the two hourly instructions that
+move money on a counterparty's say-so rather than on the clock:
+`stage_invoice_*` and `approve_invoice_*`.
+
+It can **never** block `release`, `confirm`, `dispute`, `resolve`,
+`auto_release`, `close`, `mutual_cancel`, `finalize_invoice_*`,
+`settle_period_*`, or `close_period_*`. Pausing therefore halts intake without
+ever stranding funds already in escrow — every party can still withdraw.
+
+`approve_invoice_*` is deliberately inside the gate even though it is a payout
+path. It is the only payout callable at will by a non-platform party with no
+time lock, so leaving it open would let a compromised employer (or the backend
+key that platform-signs it on the employer's behalf) drain every staged invoice
+in one slot and erase the platform's freeze window. Gating it costs nothing:
+the same invoice still pays out through the pause-free `finalize_invoice_*`
+once `release_at` passes, so a pause only removes the ability to *skip* the
+review window.
 
 Operate it with the `Config.authority` key (under the hood: `scripts/pause.ts`,
 an `update_config(paused=…)` call):
