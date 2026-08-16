@@ -33,6 +33,8 @@ pub mod trigger_auto_release_sol;
 pub mod trigger_auto_release_token;
 pub mod update_platform_authority;
 
+pub mod approve_invoice_sol;
+pub mod approve_invoice_token;
 pub mod auto_release_invoice_sol;
 pub mod auto_release_invoice_token;
 pub mod close_period_sol;
@@ -81,6 +83,8 @@ pub use trigger_auto_release_sol::*;
 pub use trigger_auto_release_token::*;
 pub use update_platform_authority::*;
 
+pub use approve_invoice_sol::*;
+pub use approve_invoice_token::*;
 pub use auto_release_invoice_sol::*;
 pub use auto_release_invoice_token::*;
 pub use close_period_sol::*;

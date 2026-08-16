@@ -469,6 +469,51 @@ async function finalizeIx(
     .instruction();
 }
 
+async function approveIx(
+  ctx: Ctx,
+  index: number,
+  o: { approver?: Keypair; period?: PublicKey; vault?: PublicKey } = {},
+): Promise<TransactionInstruction> {
+  const approver = o.approver ?? ctx.employer;
+  const period = o.period ?? ctx.period;
+  const vault = o.vault ?? ctx.vault;
+  if (ctx.isNative) {
+    return program.methods
+      .approveInvoiceSol()
+      .accountsPartial({
+        config: configPda,
+        hourlyPeriod: period,
+        invoice: invoicePda(ctx.period, index),
+        escrowVault: vault,
+        employee: ctx.employee.publicKey,
+        feeRecipient: treasury.publicKey,
+        rentPayer: ctx.platform.publicKey,
+        approver: approver.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+  }
+  return program.methods
+    .approveInvoiceToken()
+    .accountsPartial({
+      config: configPda,
+      hourlyPeriod: period,
+      invoice: invoicePda(ctx.period, index),
+      tokenMint: mint,
+      vaultTokenAccount: vault,
+      employee: ctx.employee.publicKey,
+      employeeTokenAccount: ctx.employeeAta,
+      feeRecipient: treasury.publicKey,
+      platformTokenAccount: treasuryAta,
+      rentPayer: ctx.platform.publicKey,
+      approver: approver.publicKey,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    })
+    .instruction();
+}
+
 async function resolveIx(
   ctx: Ctx,
   index: number,
@@ -1195,6 +1240,206 @@ describe("hourly v2 token: finalize_invoice_token", () => {
   });
 });
 
+describe("hourly v2 token: approve_invoice_token", () => {
+  test("the employer approves before release_at with exact money motion and rent refund", async () => {
+    const ctx = await openFunded();
+    const a0 = new BN(400_000);
+    const a1 = new BN(300_000);
+    const i0 = await stage(ctx, a0);
+    const i1 = await stage(ctx, a1);
+
+    const invoiceAcc = invoicePda(ctx.period, i0);
+    const invoiceRent = lamports(invoiceAcc);
+    expect(invoiceRent).toBeGreaterThan(0n);
+    expect(now()).toBeLessThan(n(decodeInvoice(invoiceAcc).releaseAt));
+
+    const employeeBefore = tokenBalance(ctx.employeeAta);
+    const treasuryBefore = tokenBalance(treasuryAta);
+    const vaultBefore = tokenBalance(ctx.vault);
+    const platformBefore = lamports(ctx.platform.publicKey);
+
+    send([await approveIx(ctx, i0)], [ctx.employer]);
+
+    expect(tokenBalance(ctx.employeeAta) - employeeBefore).toBe(
+      BigInt(a0.toString()),
+    );
+    expect(tokenBalance(treasuryAta) - treasuryBefore).toBe(
+      BigInt(commission(a0).toString()),
+    );
+    expect(vaultBefore - tokenBalance(ctx.vault)).toBe(
+      BigInt(grossOf(a0).toString()),
+    );
+    expect(exists(invoiceAcc)).toBe(false);
+    expect(lamports(ctx.platform.publicKey) - platformBefore).toBe(invoiceRent);
+
+    const p = decodePeriod(ctx.period);
+    expect(p.liveInvoices).toBe(1);
+    expect(n(p.releasedNet)).toBe(n(a0));
+    expect(n(p.outstandingNet)).toBe(n(a1));
+    expect(n(p.outstandingCommission)).toBe(n(commission(a1)));
+    expect(statusOf(decodeInvoice(invoicePda(ctx.period, i1)).status)).toBe(
+      "staged",
+    );
+  });
+
+  test("the platform authority may approve on the employer's behalf", async () => {
+    const ctx = await openFunded();
+    const amt = new BN(250_000);
+    const i0 = await stage(ctx, amt);
+    const employeeBefore = tokenBalance(ctx.employeeAta);
+    const treasuryBefore = tokenBalance(treasuryAta);
+
+    send(
+      [await approveIx(ctx, i0, { approver: ctx.platform })],
+      [ctx.platform],
+    );
+
+    expect(tokenBalance(ctx.employeeAta) - employeeBefore).toBe(
+      BigInt(amt.toString()),
+    );
+    expect(tokenBalance(treasuryAta) - treasuryBefore).toBe(
+      BigInt(commission(amt).toString()),
+    );
+    expect(exists(invoicePda(ctx.period, i0))).toBe(false);
+    const p = decodePeriod(ctx.period);
+    expect(p.liveInvoices).toBe(0);
+    expect(n(p.releasedNet)).toBe(n(amt));
+  });
+
+  test("neither the employee nor a stranger can approve", async () => {
+    const ctx = await openFunded();
+    const i0 = await stage(ctx, new BN(200_000));
+    const stranger = fundedKeypair();
+
+    expectFail(
+      [await approveIx(ctx, i0, { approver: ctx.employee })],
+      [ctx.employee],
+      "Unauthorized",
+    );
+    expectFail(
+      [await approveIx(ctx, i0, { approver: stranger })],
+      [stranger],
+      "Unauthorized",
+    );
+    expect(statusOf(decodeInvoice(invoicePda(ctx.period, i0)).status)).toBe(
+      "staged",
+    );
+  });
+
+  test("a disputed invoice cannot be approved", async () => {
+    const ctx = await openFunded();
+    const i0 = await stage(ctx, new BN(200_000));
+    send(
+      [await disputeIx(ctx, i0, now() + 3 * DAY, ctx.employee)],
+      [ctx.employee],
+    );
+    expectFail([await approveIx(ctx, i0)], [ctx.employer], "InvoiceNotStaged");
+  });
+
+  test("approving the same invoice twice fails on the closed account", async () => {
+    const ctx = await openFunded();
+    const i0 = await stage(ctx, new BN(200_000));
+    send([await approveIx(ctx, i0)], [ctx.employer]);
+    expectFail(
+      [await approveIx(ctx, i0)],
+      [ctx.employer],
+      "AccountNotInitialized",
+    );
+  });
+
+  test("approve still works after the review window has elapsed", async () => {
+    const ctx = await openFunded();
+    const amt = new BN(200_000);
+    const i0 = await stage(ctx, amt);
+    warpBy(REVIEW + 1);
+    const employeeBefore = tokenBalance(ctx.employeeAta);
+    send([await approveIx(ctx, i0)], [ctx.employer]);
+    expect(tokenBalance(ctx.employeeAta) - employeeBefore).toBe(
+      BigInt(amt.toString()),
+    );
+  });
+
+  test("the pause switch blocks approve for both signers without trapping the invoice", async () => {
+    const ctx = await openFunded();
+    const amt = new BN(200_000);
+    const i0 = await stage(ctx, amt);
+    const i1 = await stage(ctx, amt);
+
+    await setPaused(true);
+    expectFail([await approveIx(ctx, i0)], [ctx.employer], "ProgramPaused");
+    expectFail(
+      [await approveIx(ctx, i0, { approver: ctx.platform })],
+      [ctx.platform],
+      "ProgramPaused",
+    );
+    expect(statusOf(decodeInvoice(invoicePda(ctx.period, i0)).status)).toBe(
+      "staged",
+    );
+
+    warpBy(REVIEW + 1);
+    const finalizedBefore = tokenBalance(ctx.employeeAta);
+    send([await finalizeIx(ctx, i0)], [ctx.platform]);
+    await setPaused(false);
+
+    expect(tokenBalance(ctx.employeeAta) - finalizedBefore).toBe(
+      BigInt(amt.toString()),
+    );
+    expect(exists(invoicePda(ctx.period, i0))).toBe(false);
+
+    const approvedBefore = tokenBalance(ctx.employeeAta);
+    send([await approveIx(ctx, i1)], [ctx.employer]);
+    expect(tokenBalance(ctx.employeeAta) - approvedBefore).toBe(
+      BigInt(amt.toString()),
+    );
+    expect(exists(invoicePda(ctx.period, i1))).toBe(false);
+  });
+
+  test("an invoice of period A cannot be approved against period B", async () => {
+    const parties = newParties();
+    const a = await openFunded({ parties });
+    const b = await openFunded({ parties });
+    const i0 = await stage(a, new BN(200_000));
+    expectFail(
+      [await approveIx(a, i0, { period: b.period, vault: b.vault })],
+      [a.employer],
+      "InvoicePeriodMismatch",
+    );
+  });
+
+  test("approving one invoice leaves the employer settle refund unchanged", async () => {
+    const amounts = [new BN(400_000), new BN(300_000)];
+
+    const plain = await openFunded();
+    const p0 = await stage(plain, amounts[0]);
+    const p1 = await stage(plain, amounts[1]);
+    expect(p1).toBe(p0 + 1);
+    warpTo(plain.endAt + 1);
+    const plainEmployerBefore = tokenBalance(plain.employerAta);
+    send([await settleIx(plain)], [plain.platform]);
+    const plainRefund = tokenBalance(plain.employerAta) - plainEmployerBefore;
+
+    const approved = await openFunded();
+    const a0 = await stage(approved, amounts[0]);
+    await stage(approved, amounts[1]);
+    send([await approveIx(approved, a0)], [approved.employer]);
+    warpTo(approved.endAt + 1);
+    const approvedEmployerBefore = tokenBalance(approved.employerAta);
+    send([await settleIx(approved)], [approved.platform]);
+    const approvedRefund =
+      tokenBalance(approved.employerAta) - approvedEmployerBefore;
+
+    expect(approvedRefund).toBe(plainRefund);
+    expect(plainRefund).toBe(
+      BigInt(
+        capGross(plain)
+          .sub(grossOf(amounts[0]))
+          .sub(grossOf(amounts[1]))
+          .toString(),
+      ),
+    );
+  });
+});
+
 describe("hourly v2 token: resolve_invoice_token", () => {
   test("resolve splits net + commission exactly across employee, treasury and employer", async () => {
     const ctx = await openFunded();
@@ -1525,6 +1770,53 @@ describe("hourly v2 native SOL lifecycle", () => {
       periodRent,
     );
   });
+
+  test("the employer approves a native invoice immediately and the vault keeps its rent reserve", async () => {
+    const capNet = new BN(2 * LAMPORTS_PER_SOL);
+    const ctx = newCtx({ isNative: true, capNet, review: 3 * DAY });
+    await open(ctx, ctx.platform);
+    await fund(ctx);
+
+    const a0 = new BN(500_000_000);
+    const a1 = new BN(300_000_000);
+    const i0 = await stage(ctx, a0);
+    const i1 = await stage(ctx, a1);
+
+    const invoiceAcc = invoicePda(ctx.period, i0);
+    const invoiceRent = lamports(invoiceAcc);
+    expect(now()).toBeLessThan(n(decodeInvoice(invoiceAcc).releaseAt));
+
+    const employeeBefore = lamports(ctx.employee.publicKey);
+    const treasuryBefore = lamports(treasury.publicKey);
+    const vaultBefore = lamports(ctx.vault);
+    const platformBefore = lamports(ctx.platform.publicKey);
+
+    send([await approveIx(ctx, i0)], [ctx.employer]);
+
+    expect(lamports(ctx.employee.publicKey) - employeeBefore).toBe(
+      BigInt(a0.toString()),
+    );
+    expect(lamports(treasury.publicKey) - treasuryBefore).toBe(
+      BigInt(commission(a0).toString()),
+    );
+    expect(vaultBefore - lamports(ctx.vault)).toBe(
+      BigInt(grossOf(a0).toString()),
+    );
+    expect(lamports(ctx.platform.publicKey) - platformBefore).toBe(invoiceRent);
+    expect(exists(invoiceAcc)).toBe(false);
+    expect(lamports(ctx.vault)).toBeGreaterThanOrEqual(
+      RENT_RESERVE + BigInt(grossOf(a1).toString()),
+    );
+
+    const p = decodePeriod(ctx.period);
+    expect(p.liveInvoices).toBe(1);
+    expect(n(p.releasedNet)).toBe(n(a0));
+    expect(n(p.outstandingNet)).toBe(n(a1));
+    expect(n(p.outstandingCommission)).toBe(n(commission(a1)));
+    expect(statusOf(decodeInvoice(invoicePda(ctx.period, i1)).status)).toBe(
+      "staged",
+    );
+  });
 });
 
 describe("hourly v2: cross-period isolation", () => {
@@ -1640,6 +1932,80 @@ describe("hourly v2 native SOL: rent-exemption of the lamport vault", () => {
     const treasuryBefore = lamports(treasury.publicKey);
     send([await finalizeIx(ctx, i0)], [ctx.platform]);
     send([await finalizeIx(ctx, i1)], [ctx.platform]);
+
+    expect(lamports(ctx.employee.publicKey) - employeeBefore).toBe(
+      BigInt(amt.muln(2).toString()),
+    );
+    expect(lamports(treasury.publicKey) - treasuryBefore).toBe(
+      BigInt(commission(amt.muln(2)).toString()),
+    );
+    expect(lamports(ctx.vault)).toBe(RENT_RESERVE);
+    const p = decodePeriod(ctx.period);
+    expect(p.liveInvoices).toBe(0);
+    expect(n(p.outstandingNet)).toBe(0);
+    expect(n(p.outstandingCommission)).toBe(0);
+  });
+
+  test("approve_invoice_sol before settle leaves the vault at the reserve plus the outstanding remainder", async () => {
+    const ctx = newCtx({
+      isNative: true,
+      capNet: new BN(10_000_000),
+      review: 2 * DAY,
+    });
+    await open(ctx, ctx.platform);
+    await fund(ctx);
+    const a0 = new BN(1_200_000);
+    const a1 = new BN(800_000);
+    const i0 = await stage(ctx, a0);
+    await stage(ctx, a1);
+
+    send([await approveIx(ctx, i0)], [ctx.employer]);
+    expect(lamports(ctx.vault)).toBe(
+      RENT_RESERVE + BigInt(capGross(ctx).sub(grossOf(a0)).toString()),
+    );
+
+    warpTo(ctx.endAt + 1);
+    const employerBefore = lamports(ctx.employer.publicKey);
+    send([await settleIx(ctx)], [ctx.platform]);
+
+    expect(lamports(ctx.employer.publicKey) - employerBefore).toBe(
+      BigInt(capGross(ctx).sub(grossOf(a0)).sub(grossOf(a1)).toString()),
+    );
+    expect(lamports(ctx.vault)).toBe(
+      RENT_RESERVE + BigInt(grossOf(a1).toString()),
+    );
+    expect(lamports(ctx.vault)).toBeGreaterThanOrEqual(RENT_RESERVE);
+    const p = decodePeriod(ctx.period);
+    expect(statusOf(p.status)).toBe("settled");
+    expect(p.liveInvoices).toBe(1);
+    expect(n(p.outstandingNet)).toBe(n(a1));
+    expect(n(p.outstandingCommission)).toBe(n(commission(a1)));
+  });
+
+  test("approve_invoice_sol works for every invoice one at a time after settle", async () => {
+    const ctx = newCtx({
+      isNative: true,
+      capNet: new BN(10_000_000),
+      review: 2 * DAY,
+    });
+    await open(ctx, ctx.platform);
+    await fund(ctx);
+    const amt = new BN(476_190);
+    const i0 = await stage(ctx, amt);
+    const i1 = await stage(ctx, amt);
+    warpTo(ctx.endAt + 1);
+    send([await settleIx(ctx)], [ctx.platform]);
+    expect(lamports(ctx.vault)).toBe(
+      RENT_RESERVE + BigInt(grossOf(amt.muln(2)).toString()),
+    );
+
+    const employeeBefore = lamports(ctx.employee.publicKey);
+    const treasuryBefore = lamports(treasury.publicKey);
+    send([await approveIx(ctx, i0)], [ctx.employer]);
+    send(
+      [await approveIx(ctx, i1, { approver: ctx.platform })],
+      [ctx.platform],
+    );
 
     expect(lamports(ctx.employee.publicKey) - employeeBefore).toBe(
       BigInt(amt.muln(2).toString()),

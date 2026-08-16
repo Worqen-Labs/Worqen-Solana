@@ -11,7 +11,7 @@
     "id": "FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh",
     "name": "worqen-escrow",
     "account_schema_version": 2,
-    "program_version": "v1.2.0",
+    "program_version": "v1.3.0",
     "anchor_version": "0.32.1",
     "keypair_path": "~/.config/solana/worqen-escrow-v2-program.json",
     "so_path": "target/deploy/worqen_escrow.so",
