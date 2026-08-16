@@ -1,7 +1,7 @@
 # Worqen Escrow — developer convenience targets.
 # See README.md for full docs.
 
-PROGRAM_ID := 6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ
+PROGRAM_ID := FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh
 DEVNET_WALLET := ~/.config/solana/devnet-escrow.json
 REPO_URL := https://github.com/Worqen-Labs/Worqen-Solana
 

@@ -79,7 +79,9 @@ pub fn handler(
         );
     }
     require!(
-        ctx.accounts.config.is_mint_allowed(&token_mint_key, is_native),
+        ctx.accounts
+            .config
+            .is_mint_allowed(&token_mint_key, is_native),
         EscrowError::MintNotAllowed
     );
     require!(weekly_cap_net > 0, EscrowError::InvalidAmount);

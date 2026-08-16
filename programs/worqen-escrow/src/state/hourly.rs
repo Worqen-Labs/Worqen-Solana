@@ -95,19 +95,24 @@ impl HourlyPeriod {
     pub const MAX_PERIOD_DURATION_SECS: i64 = 30 * 24 * 60 * 60;
 
     pub fn outstanding_total(&self) -> Option<u64> {
-        self.outstanding_net.checked_add(self.outstanding_commission)
+        self.outstanding_net
+            .checked_add(self.outstanding_commission)
     }
 
     pub fn cap_gross(&self) -> Option<u64> {
-        let commission =
-            crate::state::Escrow::calculate_commission(self.weekly_cap_net, self.commission_rate_bps);
+        let commission = crate::state::Escrow::calculate_commission(
+            self.weekly_cap_net,
+            self.commission_rate_bps,
+        );
         self.weekly_cap_net.checked_add(commission)
     }
 
     pub fn marginal_commission(&self, amount: u64) -> Option<u64> {
         let new_total = self.total_staged_net.checked_add(amount)?;
-        let cum_before =
-            crate::state::Escrow::calculate_commission(self.total_staged_net, self.commission_rate_bps);
+        let cum_before = crate::state::Escrow::calculate_commission(
+            self.total_staged_net,
+            self.commission_rate_bps,
+        );
         let cum_after =
             crate::state::Escrow::calculate_commission(new_total, self.commission_rate_bps);
         Some(cum_after.saturating_sub(cum_before))
@@ -155,21 +160,7 @@ pub struct HourlyInvoice {
 }
 
 impl HourlyInvoice {
-    pub const SPACE: usize = 8
-        + 1
-        + 32
-        + 2
-        + 32
-        + 8
-        + 8
-        + 8
-        + 8
-        + 8
-        + 32
-        + 1
-        + 32
-        + 1
-        + 32;
+    pub const SPACE: usize = 8 + 1 + 32 + 2 + 32 + 8 + 8 + 8 + 8 + 8 + 32 + 1 + 32 + 1 + 32;
 
     pub const INVOICE_SEED: &'static [u8] = b"hourly_inv";
 }

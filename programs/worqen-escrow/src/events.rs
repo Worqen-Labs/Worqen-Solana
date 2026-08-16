@@ -257,6 +257,21 @@ pub struct HourlyInvoiceFinalized {
 }
 
 #[event]
+pub struct HourlyInvoiceApproved {
+    pub hire_id: [u8; 32],
+    pub period_index: u32,
+    pub invoice_index: u16,
+    pub ref_id: [u8; 32],
+    pub approved_by: Pubkey,
+    pub approved_at: i64,
+    pub release_at: i64,
+    pub amount_net: u64,
+    pub commission: u64,
+    pub is_native: bool,
+    pub token_mint: Pubkey,
+}
+
+#[event]
 pub struct HourlyInvoiceDisputeRaised {
     pub hire_id: [u8; 32],
     pub period_index: u32,

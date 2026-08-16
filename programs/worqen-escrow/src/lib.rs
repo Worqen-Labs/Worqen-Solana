@@ -18,7 +18,7 @@ security_txt! {
     policy: "https://github.com/Worqen-Labs/Worqen-Solana/blob/master/SECURITY.md",
     preferred_languages: "en",
     source_code: "https://github.com/Worqen-Labs/Worqen-Solana",
-    source_release: "v1.2.0",
+    source_release: "v1.3.0",
     auditors: "Pending external audit"
 }
 
@@ -400,12 +400,21 @@ pub mod worqen_escrow {
         instructions::finalize_invoice_token::handler(ctx)
     }
 
+    /// Employer (or the platform acting on their request) approves a staged
+    /// invoice and pays it out immediately, skipping the rest of the review
+    /// window. Money motion is identical to `finalize_invoice_sol`.
+    pub fn approve_invoice_sol(ctx: Context<ApproveInvoiceSol>) -> Result<()> {
+        instructions::approve_invoice_sol::handler(ctx)
+    }
+
+    /// Token variant of `approve_invoice_sol`.
+    pub fn approve_invoice_token(ctx: Context<ApproveInvoiceToken>) -> Result<()> {
+        instructions::approve_invoice_token::handler(ctx)
+    }
+
     /// Platform resolves a disputed invoice with a split; commission is
     /// pro-rated on the worker share, the excess refunds to the employer.
-    pub fn resolve_invoice_sol(
-        ctx: Context<ResolveInvoiceSol>,
-        employee_share: u64,
-    ) -> Result<()> {
+    pub fn resolve_invoice_sol(ctx: Context<ResolveInvoiceSol>, employee_share: u64) -> Result<()> {
         instructions::resolve_invoice_sol::handler(ctx, employee_share)
     }
 
