@@ -8,15 +8,15 @@
  *
  *   bun test
  *
- * Covers every instruction (config, SOL + token escrow lifecycles, partial
- * releases, deposit_more, batch_pay, mutual_cancel, pay_with_commission,
- * disputes + resolve, auto-release before/after deadline, pause, mint
- * allowlist, two-step config authority, per-escrow authority rotation,
- * close/close_unfunded).
+ * Covers every instruction (config, SOL + token escrow lifecycles, batch_pay,
+ * mutual_cancel, pay_with_commission, disputes + resolve, auto-release
+ * before/after deadline, pause, mint allowlist, two-step config authority,
+ * per-escrow authority rotation, close/close_unfunded) plus the authorization
+ * negative paths.
  */
 import { describe, test, expect, beforeAll } from "bun:test";
 import { LiteSvm, Clock } from "litesvm/dist/internal";
-import * as anchor from "@coral-xyz/anchor";
+import * as anchor from "@anchor-lang/core";
 import {
   Keypair,
   PublicKey,
@@ -43,7 +43,7 @@ const IDL = JSON.parse(
   fs.readFileSync("target/idl/worqen_escrow.json", "utf8"),
 );
 const PROGRAM_ID = new PublicKey(IDL.address);
-const SO_PATH = "target/deploy/worqen_escrow.so";
+const SO_PATH = process.env.WORQEN_SO_PATH ?? "target/deploy/worqen_escrow.so";
 
 const ZEROS32 = Array(32).fill(0);
 const seed = (s: string) => Buffer.from(s);
@@ -71,6 +71,7 @@ let treasury: Keypair; // fee_recipient / config.fee_recipient
 let mint: PublicKey;
 let payerAta: PublicKey;
 let treasuryAta: PublicKey;
+let platformAuthority: Keypair; // config.platform_authority — the pinned arbitrator
 
 /**
  * Build, sign and submit a legacy transaction.
@@ -199,30 +200,72 @@ function ensureAta(ownerPk: PublicKey, allowOffCurve = false): PublicKey {
   return ata;
 }
 
+/** A fresh 6-decimal mint, for wrong-mint negatives. */
+function newMint(): PublicKey {
+  const kp = Keypair.generate();
+  const rent = svm.minimumBalanceForRentExemption(BigInt(MINT_SIZE));
+  send(
+    [
+      SystemProgram.createAccount({
+        fromPubkey: payer.publicKey,
+        newAccountPubkey: kp.publicKey,
+        space: MINT_SIZE,
+        lamports: Number(rent),
+        programId: TOKEN_PROGRAM_ID,
+      }),
+      createInitializeMint2Instruction(kp.publicKey, 6, payer.publicKey, null),
+    ],
+    [kp],
+  );
+  return kp.publicKey;
+}
+
+/** Create an empty ATA for `owner` on an arbitrary mint. */
+function ensureAtaOn(mintPk: PublicKey, ownerPk: PublicKey): PublicKey {
+  const ata = getAssociatedTokenAddressSync(mintPk, ownerPk);
+  if (svm.getAccount(ata.toBytes()) === null) {
+    send([
+      createAssociatedTokenAccountInstruction(
+        payer.publicKey,
+        ata,
+        ownerPk,
+        mintPk,
+      ),
+    ]);
+  }
+  return ata;
+}
+
 /** Helper: create a SOL escrow (returns ids + PDAs + the employee/platform keypairs). */
 function newSolEscrow() {
   const id = rand32();
   const { escrow, vault } = pdas(id);
   const employee = Keypair.generate();
-  const platformAuthority = fundedKeypair(); // funded so it can co-sign + pay ATA rent in token paths
   return { id, escrow, vault, employee, platformAuthority };
 }
 
-async function createSolEscrow(
+type CreateOverrides = {
+  amount?: BN;
+  bps?: number;
+  kind?: number;
+  platform?: PublicKey;
+};
+
+async function createSolEscrowIx(
   ctx: ReturnType<typeof newSolEscrow>,
-  amount = SOL_AMT,
-) {
-  const ix = await program.methods
+  o: CreateOverrides = {},
+): Promise<TransactionInstruction> {
+  return program.methods
     .createEscrow(
       ctx.id,
       ZEROS32,
       0,
       0,
-      amount,
+      o.amount ?? SOL_AMT,
       true,
-      BPS,
+      o.bps ?? BPS,
       new BN(0),
-      0,
+      o.kind ?? 0,
       ZEROS32,
     )
     .accountsPartial({
@@ -230,32 +273,43 @@ async function createSolEscrow(
       config: configPda,
       employer: payer.publicKey,
       employee: ctx.employee.publicKey,
-      platformAuthority: ctx.platformAuthority.publicKey,
+      platformAuthority: o.platform ?? ctx.platformAuthority.publicKey,
       tokenMint: SystemProgram.programId,
       systemProgram: SystemProgram.programId,
     })
     .instruction();
-  send([ix]);
 }
 
-async function depositSol(ctx: ReturnType<typeof newSolEscrow>) {
-  const ix = await program.methods
+async function createSolEscrow(
+  ctx: ReturnType<typeof newSolEscrow>,
+  amount = SOL_AMT,
+) {
+  send([await createSolEscrowIx(ctx, { amount })]);
+}
+
+async function depositSolIx(
+  ctx: ReturnType<typeof newSolEscrow>,
+): Promise<TransactionInstruction> {
+  return program.methods
     .depositSol()
     .accountsPartial({
+      config: configPda,
       escrow: ctx.escrow,
       escrowVault: ctx.vault,
       employer: payer.publicKey,
       systemProgram: SystemProgram.programId,
     })
     .instruction();
-  send([ix]);
+}
+
+async function depositSol(ctx: ReturnType<typeof newSolEscrow>) {
+  send([await depositSolIx(ctx)]);
 }
 
 function newTokenEscrow() {
   const id = rand32();
   const { escrow } = pdas(id);
   const employee = Keypair.generate();
-  const platformAuthority = fundedKeypair();
   const vaultAta = getAssociatedTokenAddressSync(mint, escrow, true);
   return { id, escrow, employee, platformAuthority, vaultAta };
 }
@@ -290,10 +344,13 @@ async function createTokenEscrow(
   send([ix]);
 }
 
-async function depositToken(ctx: ReturnType<typeof newTokenEscrow>) {
-  const ix = await program.methods
+async function depositTokenIx(
+  ctx: ReturnType<typeof newTokenEscrow>,
+): Promise<TransactionInstruction> {
+  return program.methods
     .depositToken()
     .accountsPartial({
+      config: configPda,
       escrow: ctx.escrow,
       vaultTokenAccount: ctx.vaultAta,
       employer: payer.publicKey,
@@ -303,6 +360,17 @@ async function depositToken(ctx: ReturnType<typeof newTokenEscrow>) {
       associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
     })
+    .instruction();
+}
+
+async function depositToken(ctx: ReturnType<typeof newTokenEscrow>) {
+  send([await depositTokenIx(ctx)]);
+}
+
+async function setPaused(paused: boolean) {
+  const ix = await program.methods
+    .updateConfig(null, null, paused, null, null)
+    .accountsPartial({ config: configPda, authority: payer.publicKey })
     .instruction();
   send([ix]);
 }
@@ -404,6 +472,18 @@ beforeAll(async () => {
     .accountsPartial({ config: configPda, authority: payer.publicKey })
     .instruction();
   send([addMintIx]);
+
+  // create_escrow pins platform_authority to Config, so it must be set before
+  // any escrow can be created.
+  platformAuthority = fundedKeypair();
+  const setPlatformIx = await program.methods
+    .updateConfig(null, null, null, null, platformAuthority.publicKey)
+    .accountsPartial({ config: configPda, authority: payer.publicKey })
+    .instruction();
+  send([setPlatformIx]);
+  expect(decodeConfig().platformAuthority.toBase58()).toBe(
+    platformAuthority.publicKey.toBase58(),
+  );
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -649,91 +729,6 @@ describe("SOL escrow", () => {
     expect(decodeEscrow(ctx.escrow).status.released).toBeDefined();
   });
 
-  test("partial release: delta commission, sum-of-partials correct", async () => {
-    const ctx = newSolEscrow();
-    await createSolEscrow(ctx);
-    await depositSol(ctx);
-
-    const empBefore = balance(ctx.employee.publicKey);
-    const treBefore = balance(treasury.publicKey);
-    const half = SOL_AMT.divn(2);
-
-    const partial = async (amt: BN) => {
-      const ix = await program.methods
-        .releasePartialSol(amt, ZEROS32)
-        .accountsPartial({
-          escrow: ctx.escrow,
-          escrowVault: ctx.vault,
-          employee: ctx.employee.publicKey,
-          feeRecipient: treasury.publicKey,
-          authority: payer.publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .instruction();
-      send([ix]);
-    };
-    await partial(half);
-    await partial(SOL_AMT.sub(half));
-
-    expect(balance(ctx.employee.publicKey) - empBefore).toBe(
-      SOL_AMT.toNumber(),
-    );
-    expect(balance(treasury.publicKey) - treBefore).toBe(
-      commission(SOL_AMT).toNumber(),
-    );
-    expect(balance(ctx.vault)).toBe(0);
-    expect(decodeEscrow(ctx.escrow).status.released).toBeDefined();
-  });
-
-  test("partial release allowed in PendingRelease", async () => {
-    const ctx = newSolEscrow();
-    await createSolEscrow(ctx);
-    await depositSol(ctx);
-    await confirm(ctx.escrow, payer); // -> PendingRelease
-
-    const empBefore = balance(ctx.employee.publicKey);
-    const ix = await program.methods
-      .releasePartialSol(SOL_AMT.divn(2), ZEROS32)
-      .accountsPartial({
-        escrow: ctx.escrow,
-        escrowVault: ctx.vault,
-        employee: ctx.employee.publicKey,
-        feeRecipient: treasury.publicKey,
-        authority: payer.publicKey,
-        systemProgram: SystemProgram.programId,
-      })
-      .instruction();
-    send([ix]);
-    expect(balance(ctx.employee.publicKey) - empBefore).toBeGreaterThan(0);
-  });
-
-  test("deposit_more_sol: raises amount + commission and funds the vault", async () => {
-    const ctx = newSolEscrow();
-    await createSolEscrow(ctx);
-    await depositSol(ctx);
-
-    const vaultBefore = balance(ctx.vault);
-    const add = new BN(0.01 * LAMPORTS_PER_SOL);
-    const ix = await program.methods
-      .depositMoreSol(add)
-      .accountsPartial({
-        escrow: ctx.escrow,
-        escrowVault: ctx.vault,
-        employer: payer.publicKey,
-        systemProgram: SystemProgram.programId,
-      })
-      .instruction();
-    send([ix]);
-
-    expect(decodeEscrow(ctx.escrow).amount.toString()).toBe(
-      SOL_AMT.add(add).toString(),
-    );
-    const expectedDelta = add
-      .add(commission(SOL_AMT.add(add)))
-      .sub(commission(SOL_AMT));
-    expect(balance(ctx.vault) - vaultBefore).toBe(expectedDelta.toNumber());
-  });
-
   test("mutual_cancel_sol: employer + employee settle with a split", async () => {
     const ctx = newSolEscrow();
     await createSolEscrow(ctx);
@@ -759,7 +754,7 @@ describe("SOL escrow", () => {
     expect(decodeEscrow(ctx.escrow).status.resolved).toBeDefined();
   });
 
-  test("cancel (Created) then close_unfunded reclaims rent", async () => {
+  test("employer cancel (Created) then close_escrow_sol reclaims rent", async () => {
     const ctx = newSolEscrow();
     await createSolEscrow(ctx);
 
@@ -775,14 +770,17 @@ describe("SOL escrow", () => {
       })
       .instruction();
     send([cancelIx]);
+    expect(decodeEscrow(ctx.escrow).status.cancelled).toBeDefined();
 
     const before = balance(payer.publicKey);
     const closeIx = await program.methods
-      .closeUnfundedEscrowSol()
+      .closeEscrowSol()
       .accountsPartial({
         escrow: ctx.escrow,
+        escrowVault: ctx.vault,
         employer: payer.publicKey,
         signer: payer.publicKey,
+        systemProgram: SystemProgram.programId,
       })
       .instruction();
     send([closeIx]);
@@ -841,25 +839,17 @@ describe("token escrow", () => {
     await confirm(ctx.escrow, payer);
     await confirm(ctx.escrow, ctx.employee);
 
-    const employeeAta = getAssociatedTokenAddressSync(
-      mint,
-      ctx.employee.publicKey,
-    );
+    const employeeAta = ensureAta(ctx.employee.publicKey);
     const treBefore = tokenBalance(treasuryAta);
     const releaseIx = await program.methods
       .releaseToken(ZEROS32)
       .accountsPartial({
         escrow: ctx.escrow,
-        tokenMint: mint,
         vaultTokenAccount: ctx.vaultAta,
-        employee: ctx.employee.publicKey,
         employeeTokenAccount: employeeAta,
-        feeRecipient: treasury.publicKey,
         platformTokenAccount: treasuryAta,
         authority: payer.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
       })
       .instruction();
     send([releaseIx]);
@@ -877,8 +867,7 @@ describe("token escrow", () => {
     await confirm(ctx.escrow, payer);
     await confirm(ctx.escrow, ctx.employee);
 
-    // Pre-create the employee ATA: the employee is the release authority here
-    // but holds 0 SOL, so it cannot fund the on-demand ATA init rent itself.
+    // Destination ATAs are the caller's responsibility since v1.5.0.
     const employeeAta = ensureAta(ctx.employee.publicKey);
     const treBefore = tokenBalance(treasuryAta);
     // Employee is the release authority but holds 0 SOL; payer is feePayer.
@@ -886,16 +875,11 @@ describe("token escrow", () => {
       .releaseToken(ZEROS32)
       .accountsPartial({
         escrow: ctx.escrow,
-        tokenMint: mint,
         vaultTokenAccount: ctx.vaultAta,
-        employee: ctx.employee.publicKey,
         employeeTokenAccount: employeeAta,
-        feeRecipient: treasury.publicKey,
         platformTokenAccount: treasuryAta,
         authority: ctx.employee.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
       })
       .instruction();
     send([ix], [ctx.employee]);
@@ -909,104 +893,24 @@ describe("token escrow", () => {
     );
   });
 
-  test("release_partial_token: delta-commission slices pay employee + treasury ATAs", async () => {
-    const ctx = newTokenEscrow();
-    await createTokenEscrow(ctx);
-    await depositToken(ctx);
-
-    const employeeAta = getAssociatedTokenAddressSync(
-      mint,
-      ctx.employee.publicKey,
-    );
-    const treBefore = tokenBalance(treasuryAta);
-    const half = TOK_AMT.divn(2);
-    const partial = async (amt: BN) => {
-      const ix = await program.methods
-        .releasePartialToken(amt, ZEROS32)
-        .accountsPartial({
-          escrow: ctx.escrow,
-          tokenMint: mint,
-          vaultTokenAccount: ctx.vaultAta,
-          employee: ctx.employee.publicKey,
-          employeeTokenAccount: employeeAta,
-          feeRecipient: treasury.publicKey,
-          platformTokenAccount: treasuryAta,
-          authority: payer.publicKey,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .instruction();
-      send([ix]);
-    };
-    await partial(half);
-    await partial(TOK_AMT.sub(half));
-
-    expect(tokenBalance(employeeAta)).toBe(BigInt(TOK_AMT.toString()));
-    expect(tokenBalance(treasuryAta) - treBefore).toBe(
-      BigInt(commission(TOK_AMT).toString()),
-    );
-    expect(tokenBalance(ctx.vaultAta)).toBe(0n);
-    expect(decodeEscrow(ctx.escrow).status.released).toBeDefined();
-  });
-
-  test("deposit_more_token: top-up raises amount + commission and funds the vault ATA", async () => {
-    const ctx = newTokenEscrow();
-    await createTokenEscrow(ctx);
-    await depositToken(ctx);
-
-    const vaultBefore = tokenBalance(ctx.vaultAta);
-    const add = new BN(500_000);
-    const ix = await program.methods
-      .depositMoreToken(add)
-      .accountsPartial({
-        escrow: ctx.escrow,
-        vaultTokenAccount: ctx.vaultAta,
-        employer: payer.publicKey,
-        employerTokenAccount: payerAta,
-        tokenMint: mint,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .instruction();
-    send([ix]);
-
-    expect(decodeEscrow(ctx.escrow).amount.toString()).toBe(
-      TOK_AMT.add(add).toString(),
-    );
-    const expectedDelta = add
-      .add(commission(TOK_AMT.add(add)))
-      .sub(commission(TOK_AMT));
-    expect(tokenBalance(ctx.vaultAta) - vaultBefore).toBe(
-      BigInt(expectedDelta.toString()),
-    );
-  });
-
   test("mutual_cancel_token: employer + employee settle with a split", async () => {
     const ctx = newTokenEscrow();
     await createTokenEscrow(ctx);
     await depositToken(ctx);
 
-    const employeeAta = getAssociatedTokenAddressSync(
-      mint,
-      ctx.employee.publicKey,
-    );
+    const employeeAta = ensureAta(ctx.employee.publicKey);
     const share = TOK_AMT.divn(3);
     const ix = await program.methods
       .mutualCancelToken(share)
       .accountsPartial({
         escrow: ctx.escrow,
-        tokenMint: mint,
         vaultTokenAccount: ctx.vaultAta,
         employer: payer.publicKey,
         employerTokenAccount: payerAta,
         employee: ctx.employee.publicKey,
         employeeTokenAccount: employeeAta,
-        feeRecipient: treasury.publicKey,
         platformTokenAccount: treasuryAta,
         tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
       })
       .instruction();
     send([ix], [ctx.employee]);
@@ -1055,24 +959,16 @@ describe("token escrow", () => {
     await depositToken(ctx);
     await confirm(ctx.escrow, payer);
     await confirm(ctx.escrow, ctx.employee);
-    const employeeAta = getAssociatedTokenAddressSync(
-      mint,
-      ctx.employee.publicKey,
-    );
+    const employeeAta = ensureAta(ctx.employee.publicKey);
     const releaseIx = await program.methods
       .releaseToken(ZEROS32)
       .accountsPartial({
         escrow: ctx.escrow,
-        tokenMint: mint,
         vaultTokenAccount: ctx.vaultAta,
-        employee: ctx.employee.publicKey,
         employeeTokenAccount: employeeAta,
-        feeRecipient: treasury.publicKey,
         platformTokenAccount: treasuryAta,
         authority: payer.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
       })
       .instruction();
     send([releaseIx]);
@@ -1303,18 +1199,12 @@ describe("disputes", () => {
       .resolveDisputeToken(share)
       .accountsPartial({
         escrow: ctx.escrow,
-        tokenMint: mint,
         vaultTokenAccount: ctx.vaultAta,
-        employer: payer.publicKey,
         employerTokenAccount: payerAta,
-        employee: ctx.employee.publicKey,
         employeeTokenAccount: employeeAta,
-        feeRecipient: treasury.publicKey,
         platformTokenAccount: treasuryAta,
         platformAuthority: ctx.platformAuthority.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
       })
       .instruction();
     send([resolveIx], [ctx.platformAuthority]);
@@ -1457,18 +1347,12 @@ describe("disputes", () => {
       .triggerAutoReleaseToken()
       .accountsPartial({
         escrow: ctx.escrow,
-        tokenMint: mint,
         vaultTokenAccount: ctx.vaultAta,
-        employee: ctx.employee.publicKey,
         employeeTokenAccount: employeeAta,
-        employer: payer.publicKey,
         employerTokenAccount: payerAta,
-        feeRecipient: treasury.publicKey,
         platformTokenAccount: treasuryAta,
         caller: payer.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
       })
       .instruction();
     send([triggerIx]);
@@ -1501,18 +1385,12 @@ describe("disputes", () => {
       .triggerAutoReleaseToken()
       .accountsPartial({
         escrow: ctx.escrow,
-        tokenMint: mint,
         vaultTokenAccount: ctx.vaultAta,
-        employee: ctx.employee.publicKey,
         employeeTokenAccount: employeeAta,
-        employer: payer.publicKey,
         employerTokenAccount: payerAta,
-        feeRecipient: treasury.publicKey,
         platformTokenAccount: treasuryAta,
         caller: payer.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
       })
       .instruction();
     expectFail([triggerIx], [], "DisputeDeadlineNotReached");
@@ -1538,6 +1416,370 @@ describe("platform authority", () => {
     send([ix], [ctx.platformAuthority]);
     expect(decodeEscrow(ctx.escrow).platformAuthority.toBase58()).toBe(
       newPlatformAuthority.publicKey.toBase58(),
+    );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Authorization negatives (R-54): the guards that hold the money
+// ─────────────────────────────────────────────────────────────────────────────
+describe("authorization negatives", () => {
+  test("a stranger cannot release a funded escrow", async () => {
+    const ctx = newSolEscrow();
+    await createSolEscrow(ctx);
+    await depositSol(ctx);
+    await confirm(ctx.escrow, payer);
+
+    const stranger = fundedKeypair();
+    const ix = await program.methods
+      .releaseSol(ZEROS32)
+      .accountsPartial({
+        escrow: ctx.escrow,
+        escrowVault: ctx.vault,
+        employee: ctx.employee.publicKey,
+        feeRecipient: treasury.publicKey,
+        authority: stranger.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+    expectFail([ix], [stranger], "ReleaseNotAuthorized");
+    expect(balance(ctx.vault)).toBe(
+      SOL_AMT.add(commission(SOL_AMT)).toNumber(),
+    );
+  });
+
+  test("the employer cannot release before confirming completion", async () => {
+    const ctx = newSolEscrow();
+    await createSolEscrow(ctx);
+    await depositSol(ctx);
+
+    const ix = await program.methods
+      .releaseSol(ZEROS32)
+      .accountsPartial({
+        escrow: ctx.escrow,
+        escrowVault: ctx.vault,
+        employee: ctx.employee.publicKey,
+        feeRecipient: treasury.publicKey,
+        authority: payer.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+    expectFail([ix], [], "ReleaseNotAuthorized");
+  });
+
+  test("release to a fee_recipient that is not the escrow treasury is rejected", async () => {
+    const ctx = newSolEscrow();
+    await createSolEscrow(ctx);
+    await depositSol(ctx);
+    await confirm(ctx.escrow, payer);
+
+    const ix = await program.methods
+      .releaseSol(ZEROS32)
+      .accountsPartial({
+        escrow: ctx.escrow,
+        escrowVault: ctx.vault,
+        employee: ctx.employee.publicKey,
+        feeRecipient: Keypair.generate().publicKey,
+        authority: payer.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+    expectFail([ix], [], "InvalidFeeRecipient");
+  });
+
+  test("the employer cannot cancel a Funded escrow; the platform can", async () => {
+    const ctx = newSolEscrow();
+    await createSolEscrow(ctx);
+    await depositSol(ctx);
+
+    const employerCancel = await program.methods
+      .cancelEscrowSol(Buffer.from("I changed my mind"))
+      .accountsPartial({
+        escrow: ctx.escrow,
+        escrowVault: ctx.vault,
+        employer: payer.publicKey,
+        feeRecipient: treasury.publicKey,
+        signer: payer.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+    expectFail([employerCancel], [], "EmployerCancelAfterFundedDisallowed");
+    expect(decodeEscrow(ctx.escrow).status.funded).toBeDefined();
+
+    const platformCancel = await program.methods
+      .cancelEscrowSol(Buffer.from("platform refund"))
+      .accountsPartial({
+        escrow: ctx.escrow,
+        escrowVault: ctx.vault,
+        employer: payer.publicKey,
+        feeRecipient: treasury.publicKey,
+        signer: ctx.platformAuthority.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+    send([platformCancel], [ctx.platformAuthority]);
+    expect(decodeEscrow(ctx.escrow).status.cancelled).toBeDefined();
+  });
+
+  test("platform_authority cannot be rotated while the escrow is Disputed", async () => {
+    const ctx = newSolEscrow();
+    await createSolEscrow(ctx);
+    await depositSol(ctx);
+    const raiseIx = await program.methods
+      .raiseDispute(Buffer.from("quality"), new BN(now() + 5 * DAY))
+      .accountsPartial({ escrow: ctx.escrow, signer: payer.publicKey })
+      .instruction();
+    send([raiseIx]);
+
+    const ix = await program.methods
+      .updatePlatformAuthority()
+      .accountsPartial({
+        escrow: ctx.escrow,
+        currentPlatformAuthority: ctx.platformAuthority.publicKey,
+        newPlatformAuthority: Keypair.generate().publicKey,
+      })
+      .instruction();
+    expectFail([ix], [ctx.platformAuthority], "AuthorityRotationDuringDispute");
+    expect(decodeEscrow(ctx.escrow).platformAuthority.toBase58()).toBe(
+      ctx.platformAuthority.publicKey.toBase58(),
+    );
+  });
+
+  test("resolve_dispute_sol with an employee_share above the worker amount is rejected", async () => {
+    const ctx = newSolEscrow();
+    await createSolEscrow(ctx);
+    await depositSol(ctx);
+    const raiseIx = await program.methods
+      .raiseDispute(Buffer.from("quality"), new BN(now() + 5 * DAY))
+      .accountsPartial({ escrow: ctx.escrow, signer: payer.publicKey })
+      .instruction();
+    send([raiseIx]);
+
+    const ix = await program.methods
+      .resolveDisputeSol(SOL_AMT.addn(1))
+      .accountsPartial({
+        escrow: ctx.escrow,
+        escrowVault: ctx.vault,
+        employer: payer.publicKey,
+        employee: ctx.employee.publicKey,
+        feeRecipient: treasury.publicKey,
+        platformAuthority: ctx.platformAuthority.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+    expectFail([ix], [ctx.platformAuthority], "InvalidEmployeeShare");
+    expect(decodeEscrow(ctx.escrow).status.disputed).toBeDefined();
+  });
+
+  test("close_escrow_sol on a non-terminal escrow is rejected", async () => {
+    const ctx = newSolEscrow();
+    await createSolEscrow(ctx);
+    await depositSol(ctx);
+
+    const ix = await program.methods
+      .closeEscrowSol()
+      .accountsPartial({
+        escrow: ctx.escrow,
+        escrowVault: ctx.vault,
+        employer: payer.publicKey,
+        signer: payer.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+    expectFail([ix], [], "EscrowNotTerminal");
+    expect(escrowExists(ctx.escrow)).toBe(true);
+  });
+
+  test("pay_with_commission_sol to yourself is rejected", async () => {
+    const ix = await program.methods
+      .payWithCommissionSol(rand32(), new BN(0.001 * LAMPORTS_PER_SOL), BPS)
+      .accountsPartial({
+        payer: payer.publicKey,
+        recipient: payer.publicKey,
+        feeRecipient: treasury.publicKey,
+        config: configPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+    expectFail([ix], [], "SelfPaymentNotAllowed");
+  });
+
+  test("create_escrow above the 1000 bps commission cap is rejected", async () => {
+    const ctx = newSolEscrow();
+    expectFail(
+      [await createSolEscrowIx(ctx, { bps: 1001 })],
+      [],
+      "InvalidCommissionRate",
+    );
+    expect(escrowExists(ctx.escrow)).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v1.5.0: destination token accounts are the caller's responsibility, bound by
+// owner + mint only (no on-chain ATA derivation, no init_if_needed)
+// ─────────────────────────────────────────────────────────────────────────────
+describe("caller-owned destination token accounts", () => {
+  async function releasableTokenEscrow() {
+    const ctx = newTokenEscrow();
+    await createTokenEscrow(ctx);
+    await depositToken(ctx);
+    await confirm(ctx.escrow, payer);
+    await confirm(ctx.escrow, ctx.employee);
+    return ctx;
+  }
+
+  async function releaseIx(
+    ctx: ReturnType<typeof newTokenEscrow>,
+    o: {
+      employeeTokenAccount?: PublicKey;
+      platformTokenAccount?: PublicKey;
+    } = {},
+  ): Promise<TransactionInstruction> {
+    return program.methods
+      .releaseToken(ZEROS32)
+      .accountsPartial({
+        escrow: ctx.escrow,
+        vaultTokenAccount: ctx.vaultAta,
+        employeeTokenAccount:
+          o.employeeTokenAccount ??
+          getAssociatedTokenAddressSync(mint, ctx.employee.publicKey),
+        platformTokenAccount: o.platformTokenAccount ?? treasuryAta,
+        authority: payer.publicKey,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .instruction();
+  }
+
+  test("an employee token account owned by someone else is rejected", async () => {
+    const ctx = await releasableTokenEscrow();
+    const strangerAta = ensureAta(Keypair.generate().publicKey);
+    const vaultBefore = tokenBalance(ctx.vaultAta);
+
+    expectFail(
+      [await releaseIx(ctx, { employeeTokenAccount: strangerAta })],
+      [],
+      "Unauthorized",
+    );
+    expect(tokenBalance(strangerAta)).toBe(0n);
+    expect(tokenBalance(ctx.vaultAta)).toBe(vaultBefore);
+    expect(decodeEscrow(ctx.escrow).status.released).toBeUndefined();
+  });
+
+  test("an employee token account on the wrong mint is rejected", async () => {
+    const ctx = await releasableTokenEscrow();
+    const wrongMintAta = ensureAtaOn(newMint(), ctx.employee.publicKey);
+
+    expectFail(
+      [await releaseIx(ctx, { employeeTokenAccount: wrongMintAta })],
+      [],
+      "InvalidTokenMint",
+    );
+    expect(decodeEscrow(ctx.escrow).status.released).toBeUndefined();
+  });
+
+  test("a treasury token account owned by someone else is rejected", async () => {
+    const ctx = await releasableTokenEscrow();
+    ensureAta(ctx.employee.publicKey);
+    const fakeTreasuryAta = ensureAta(Keypair.generate().publicKey);
+
+    expectFail(
+      [await releaseIx(ctx, { platformTokenAccount: fakeTreasuryAta })],
+      [],
+      "Unauthorized",
+    );
+    expect(tokenBalance(fakeTreasuryAta)).toBe(0n);
+    expect(decodeEscrow(ctx.escrow).status.released).toBeUndefined();
+  });
+
+  test("a missing employee token account fails cleanly, then the caller creates it", async () => {
+    const ctx = await releasableTokenEscrow();
+    const employeeAta = getAssociatedTokenAddressSync(
+      mint,
+      ctx.employee.publicKey,
+    );
+    expect(svm.getAccount(employeeAta.toBytes())).toBeNull();
+
+    expectFail([await releaseIx(ctx)], [], "AccountNotInitialized");
+    expect(decodeEscrow(ctx.escrow).status.released).toBeUndefined();
+
+    send([
+      createAssociatedTokenAccountInstruction(
+        payer.publicKey,
+        employeeAta,
+        ctx.employee.publicKey,
+        mint,
+      ),
+      await releaseIx(ctx),
+    ]);
+    expect(tokenBalance(employeeAta)).toBe(BigInt(TOK_AMT.toString()));
+    expect(decodeEscrow(ctx.escrow).status.released).toBeDefined();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v1.4.0 hardening: pinned arbitrator, pause-gated deposits, kind validation
+// ─────────────────────────────────────────────────────────────────────────────
+describe("v1.4.0 hardening", () => {
+  test("create_escrow rejects a platform_authority that is not the config one", async () => {
+    const ctx = newSolEscrow();
+    const friendly = fundedKeypair();
+    expectFail(
+      [await createSolEscrowIx(ctx, { platform: friendly.publicKey })],
+      [],
+      "InvalidPlatformAuthority",
+    );
+    expect(escrowExists(ctx.escrow)).toBe(false);
+
+    send([await createSolEscrowIx(ctx)]);
+    expect(decodeEscrow(ctx.escrow).platformAuthority.toBase58()).toBe(
+      decodeConfig().platformAuthority.toBase58(),
+    );
+  });
+
+  test("create_escrow rejects an unknown escrow_kind byte and accepts the known ones", async () => {
+    const bad = newSolEscrow();
+    expectFail(
+      [await createSolEscrowIx(bad, { kind: 7 })],
+      [],
+      "InvalidEscrowKind",
+    );
+    expect(escrowExists(bad.escrow)).toBe(false);
+
+    for (const kind of [0, 1, 2, 255]) {
+      const ctx = newSolEscrow();
+      send([await createSolEscrowIx(ctx, { kind })]);
+      expect(decodeEscrow(ctx.escrow).escrowKind).toBe(kind);
+    }
+  });
+
+  test("pause blocks deposit_sol into an already-created escrow", async () => {
+    const ctx = newSolEscrow();
+    await createSolEscrow(ctx);
+
+    await setPaused(true);
+    expectFail([await depositSolIx(ctx)], [], "ProgramPaused");
+    expect(balance(ctx.vault)).toBe(0);
+
+    await setPaused(false);
+    await depositSol(ctx);
+    expect(balance(ctx.vault)).toBe(
+      SOL_AMT.add(commission(SOL_AMT)).toNumber(),
+    );
+  });
+
+  test("pause blocks deposit_token into an already-created escrow", async () => {
+    const ctx = newTokenEscrow();
+    await createTokenEscrow(ctx);
+
+    await setPaused(true);
+    expectFail([await depositTokenIx(ctx)], [], "ProgramPaused");
+    expect(tokenBalance(ctx.vaultAta)).toBe(0n);
+
+    await setPaused(false);
+    await depositToken(ctx);
+    expect(tokenBalance(ctx.vaultAta)).toBe(
+      BigInt(TOK_AMT.add(commission(TOK_AMT)).toString()),
     );
   });
 });

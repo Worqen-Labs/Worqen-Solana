@@ -67,7 +67,7 @@ pub fn handler(ctx: Context<FundPeriodSol>, max_fund_amount: u64) -> Result<()> 
 
     transfer(
         CpiContext::new(
-            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.system_program.key(),
             Transfer {
                 from: ctx.accounts.employer.to_account_info(),
                 to: ctx.accounts.escrow_vault.to_account_info(),

@@ -31,10 +31,6 @@ pub struct CloseUnfundedEscrowToken<'info> {
     pub signer: Signer<'info>,
 }
 
-pub fn handler(ctx: Context<CloseUnfundedEscrowToken>) -> Result<()> {
-    msg!(
-        "Unfunded token escrow {:?} closed; rent refunded to employer",
-        ctx.accounts.escrow.escrow_id
-    );
+pub fn handler(_ctx: Context<CloseUnfundedEscrowToken>) -> Result<()> {
     Ok(())
 }

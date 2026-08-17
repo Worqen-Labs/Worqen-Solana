@@ -2,8 +2,7 @@ use crate::errors::EscrowError;
 use crate::events::HourlyInvoiceResolved;
 use crate::state::*;
 use anchor_lang::prelude::*;
-use anchor_spl::associated_token::AssociatedToken;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 #[derive(Accounts)]
 pub struct ResolveInvoiceToken<'info> {
@@ -23,9 +22,6 @@ pub struct ResolveInvoiceToken<'info> {
     )]
     pub invoice: Box<Account<'info, HourlyInvoice>>,
 
-    #[account(constraint = token_mint.key() == hourly_period.token_mint @ EscrowError::InvalidTokenMint)]
-    pub token_mint: Box<Account<'info, Mint>>,
-
     #[account(
         mut,
         constraint = vault_token_account.owner == hourly_period.key() @ EscrowError::Unauthorized,
@@ -33,39 +29,24 @@ pub struct ResolveInvoiceToken<'info> {
     )]
     pub vault_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// CHECK: matched against hourly_period.employer
-    #[account(constraint = employer.key() == hourly_period.employer @ EscrowError::Unauthorized)]
-    pub employer: UncheckedAccount<'info>,
-
     #[account(
-        init_if_needed,
-        payer = platform_authority,
-        associated_token::mint = token_mint,
-        associated_token::authority = employer,
+        mut,
+        constraint = employer_token_account.owner == hourly_period.employer @ EscrowError::Unauthorized,
+        constraint = employer_token_account.mint == hourly_period.token_mint @ EscrowError::InvalidTokenMint,
     )]
     pub employer_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// CHECK: matched against hourly_period.employee
-    #[account(constraint = employee.key() == hourly_period.employee @ EscrowError::Unauthorized)]
-    pub employee: UncheckedAccount<'info>,
-
     #[account(
-        init_if_needed,
-        payer = platform_authority,
-        associated_token::mint = token_mint,
-        associated_token::authority = employee,
+        mut,
+        constraint = employee_token_account.owner == hourly_period.employee @ EscrowError::Unauthorized,
+        constraint = employee_token_account.mint == hourly_period.token_mint @ EscrowError::InvalidTokenMint,
     )]
     pub employee_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// CHECK: matched against hourly_period.fee_recipient
-    #[account(constraint = fee_recipient.key() == hourly_period.fee_recipient @ EscrowError::InvalidFeeRecipient)]
-    pub fee_recipient: UncheckedAccount<'info>,
-
     #[account(
-        init_if_needed,
-        payer = platform_authority,
-        associated_token::mint = token_mint,
-        associated_token::authority = fee_recipient,
+        mut,
+        constraint = platform_token_account.owner == hourly_period.fee_recipient @ EscrowError::Unauthorized,
+        constraint = platform_token_account.mint == hourly_period.token_mint @ EscrowError::InvalidTokenMint,
     )]
     pub platform_token_account: Box<Account<'info, TokenAccount>>,
 
@@ -76,12 +57,9 @@ pub struct ResolveInvoiceToken<'info> {
     )]
     pub rent_payer: UncheckedAccount<'info>,
 
-    #[account(mut)]
     pub platform_authority: Signer<'info>,
 
     pub token_program: Program<'info, Token>,
-    pub associated_token_program: Program<'info, AssociatedToken>,
-    pub system_program: Program<'info, System>,
 }
 
 pub fn handler(ctx: Context<ResolveInvoiceToken>, employee_share: u64) -> Result<()> {
@@ -130,7 +108,7 @@ pub fn handler(ctx: Context<ResolveInvoiceToken>, employee_share: u64) -> Result
     if employee_share > 0 {
         token::transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.employee_token_account.to_account_info(),
@@ -144,7 +122,7 @@ pub fn handler(ctx: Context<ResolveInvoiceToken>, employee_share: u64) -> Result
     if treasury_leg > 0 {
         token::transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.platform_token_account.to_account_info(),
@@ -158,7 +136,7 @@ pub fn handler(ctx: Context<ResolveInvoiceToken>, employee_share: u64) -> Result
     if employer_leg > 0 {
         token::transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.employer_token_account.to_account_info(),

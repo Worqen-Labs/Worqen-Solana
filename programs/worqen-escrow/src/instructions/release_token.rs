@@ -2,12 +2,12 @@ use crate::errors::EscrowError;
 use crate::events::EscrowReleased;
 use crate::state::{Escrow, EscrowStatus};
 use anchor_lang::prelude::*;
-use anchor_spl::associated_token::AssociatedToken;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 /// Accounts for releasing tokens from escrow. Every token account is
 /// constrained on both `mint` and `owner` so a malicious authority cannot
-/// redirect funds by swapping in an account they control.
+/// redirect funds by swapping in an account they control. Destination accounts
+/// must already exist — the caller creates them.
 #[derive(Accounts)]
 pub struct ReleaseToken<'info> {
     #[account(
@@ -17,12 +17,6 @@ pub struct ReleaseToken<'info> {
     )]
     pub escrow: Box<Account<'info, Escrow>>,
 
-    /// The mint this escrow is denominated in.
-    #[account(
-        constraint = token_mint.key() == escrow.token_mint @ EscrowError::InvalidTokenMint,
-    )]
-    pub token_mint: Box<Account<'info, Mint>>,
-
     /// The vault token account — owner must be the escrow PDA, mint must match.
     #[account(
         mut,
@@ -31,23 +25,13 @@ pub struct ReleaseToken<'info> {
     )]
     pub vault_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// CHECK: Verified against escrow.employee
-    #[account(constraint = employee.key() == escrow.employee @ EscrowError::Unauthorized)]
-    pub employee: UncheckedAccount<'info>,
-
-    /// Employee's ATA, created on demand (authority pays rent) so 0-SOL
-    /// employees can still be paid.
+    /// Employee's token account. Owner + mint are the whole binding.
     #[account(
-        init_if_needed,
-        payer = authority,
-        associated_token::mint = token_mint,
-        associated_token::authority = employee,
+        mut,
+        constraint = employee_token_account.owner == escrow.employee @ EscrowError::Unauthorized,
+        constraint = employee_token_account.mint == escrow.token_mint @ EscrowError::InvalidTokenMint,
     )]
     pub employee_token_account: Box<Account<'info, TokenAccount>>,
-
-    /// CHECK: Verified against escrow.fee_recipient
-    #[account(constraint = fee_recipient.key() == escrow.fee_recipient @ EscrowError::InvalidFeeRecipient)]
-    pub fee_recipient: UncheckedAccount<'info>,
 
     /// Treasury token account. Constrained on owner + mint to prevent
     /// commission redirection.
@@ -59,13 +43,9 @@ pub struct ReleaseToken<'info> {
     pub platform_token_account: Box<Account<'info, TokenAccount>>,
 
     /// Employer (confirmed), platform_authority, or employee (both confirmed).
-    /// Also pays for employee ATA init when needed.
-    #[account(mut)]
     pub authority: Signer<'info>,
 
     pub token_program: Program<'info, Token>,
-    pub associated_token_program: Program<'info, AssociatedToken>,
-    pub system_program: Program<'info, System>,
 }
 
 /// Releases the remaining escrowed tokens: worker gets their recorded amount,
@@ -98,7 +78,7 @@ pub fn handler(ctx: Context<ReleaseToken>, ref_id: [u8; 32]) -> Result<()> {
     // Pay the worker first.
     token::transfer(
         CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
+            ctx.accounts.token_program.key(),
             Transfer {
                 from: ctx.accounts.vault_token_account.to_account_info(),
                 to: ctx.accounts.employee_token_account.to_account_info(),
@@ -115,7 +95,7 @@ pub fn handler(ctx: Context<ReleaseToken>, ref_id: [u8; 32]) -> Result<()> {
     if commission_amount > 0 {
         token::transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.platform_token_account.to_account_info(),
@@ -145,12 +125,6 @@ pub fn handler(ctx: Context<ReleaseToken>, ref_id: [u8; 32]) -> Result<()> {
         remaining_worker_amount: 0,
         ref_id,
     });
-
-    msg!(
-        "Released {} tokens to employee, {} tokens to platform",
-        worker_amount,
-        commission_amount
-    );
 
     Ok(())
 }

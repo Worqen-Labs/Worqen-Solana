@@ -47,7 +47,7 @@ pub struct BatchPayWithCommissionToken<'info> {
 }
 
 pub fn handler<'info>(
-    ctx: Context<'_, '_, '_, 'info, BatchPayWithCommissionToken<'info>>,
+    ctx: Context<'info, BatchPayWithCommissionToken<'info>>,
     hire_id: [u8; 32],
     amounts: Vec<u64>,
     commission_bps: u16,
@@ -107,7 +107,7 @@ pub fn handler<'info>(
 
         token::transfer(
             CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.payer_token_account.to_account_info(),
                     to: recip.clone(),
@@ -122,7 +122,7 @@ pub fn handler<'info>(
     if commission_amount > 0 {
         token::transfer(
             CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.payer_token_account.to_account_info(),
                     to: ctx.accounts.fee_token_account.to_account_info(),
@@ -146,16 +146,6 @@ pub fn handler<'info>(
         token_mint: token_mint_key,
         paid_at: clock.unix_timestamp,
     });
-
-    msg!(
-        "BatchPaymentToken hire={:?} recipients={} total_worker={} commission={} ({}bps) mint={}",
-        hire_id,
-        recips.len(),
-        total_worker,
-        commission_amount,
-        commission_bps,
-        token_mint_key
-    );
 
     Ok(())
 }

@@ -80,7 +80,7 @@ pub fn handler(ctx: Context<FinalizeInvoiceSol>) -> Result<()> {
     if amount_net > 0 {
         transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.system_program.key(),
                 Transfer {
                     from: ctx.accounts.escrow_vault.to_account_info(),
                     to: ctx.accounts.employee.to_account_info(),
@@ -93,7 +93,7 @@ pub fn handler(ctx: Context<FinalizeInvoiceSol>) -> Result<()> {
     if commission > 0 {
         transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.system_program.key(),
                 Transfer {
                     from: ctx.accounts.escrow_vault.to_account_info(),
                     to: ctx.accounts.fee_recipient.to_account_info(),

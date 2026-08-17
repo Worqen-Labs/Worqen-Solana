@@ -8,7 +8,7 @@ on:
 
 env:
   SOLANA_VERSION: "4.0.0"
-  ANCHOR_VERSION: "0.32.1"
+  ANCHOR_VERSION: "1.1.2"
 
 jobs:
   lint:
@@ -42,7 +42,7 @@ jobs:
 
       - name: Install Anchor (avm)
         run: |
-          cargo install --git https://github.com/coral-xyz/anchor avm --force --locked
+          cargo install --git https://github.com/solana-foundation/anchor avm --force --locked
           avm install ${ANCHOR_VERSION}
           avm use ${ANCHOR_VERSION}
 
@@ -50,8 +50,33 @@ jobs:
       - run: bun install --frozen-lockfile
 
       # Build the program; the .so is loaded in-process by LiteSVM (no validator).
+      # This is the DEFAULT-ARCH artifact — LiteSVM 1.1.0 cannot load an SBPFv3
+      # .so, so the suite runs against this one and deploys use the other.
       - run: anchor build
 
       # Full per-instruction suite, in-process via LiteSVM — fast, deterministic,
       # supports clock warp (time-locked auto-release is covered).
       - run: bun test
+
+      # Guard the artifact that actually ships: build the SBPFv3 deployable and
+      # assert the dynamic-relocation sections really are gone. A broken deploy
+      # build must fail here, not in deploy.yml.
+      - name: Build the SBPFv3 deployable
+        run: make build-deploy
+
+      - name: Assert the v3 artifact is relocation-free and report sizes
+        run: |
+          set -euo pipefail
+          SO=target/deploy-v3/worqen_escrow.so
+          readelf -h -W "$SO" | grep -q 'CPU Version: 3'
+          for s in .rel.dyn .dynsym .dynstr .dynamic; do
+            if readelf -S -W "$SO" | grep -q " $s "; then
+              echo "::error::$s survived in the v3 artifact"; exit 1
+            fi
+          done
+          {
+            echo "| artifact | bytes |"
+            echo "|---|--:|"
+            echo "| default-arch (LiteSVM tests) | $(stat -c '%s' target/deploy/worqen_escrow.so) |"
+            echo "| SBPFv3 (deploys) | $(stat -c '%s' "$SO") |"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -9,6 +9,10 @@
  * commission, or authority on an existing Config — those it only reports
  * (mutate them deliberately with update_config / a handoff).
  *
+ * Both paths then idempotently create the treasury ATA for every allowlisted
+ * mint. Since v1.5.0 the program never creates a destination token account, so
+ * a missing treasury ATA makes every commission-bearing payout fail.
+ *
  * Run from the repo root after `anchor build`:
  *
  *   RPC_URL=https://<mainnet-rpc> \
@@ -26,8 +30,12 @@
  * After bootstrap, hand Config.authority to your multisig (two-step):
  *   update_config(new_pending_authority=<squads>)  then  accept_authority(<squads>).
  */
-import * as anchor from "@coral-xyz/anchor";
-import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import * as anchor from "@anchor-lang/core";
+import {
+  createAssociatedTokenAccountIdempotentInstruction,
+  getAssociatedTokenAddressSync,
+} from "@solana/spl-token";
+import { Connection, Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 
@@ -63,6 +71,33 @@ function parseMints(): PublicKey[] {
     .map((s) => s.trim())
     .filter(Boolean)
     .map((s) => pubkey("ALLOWED_MINTS entry", s));
+}
+
+async function ensureTreasuryAtas(
+  provider: anchor.AnchorProvider,
+  feeRecipient: PublicKey,
+  mints: PublicKey[],
+): Promise<void> {
+  if (mints.length === 0) return;
+  const payer = provider.wallet.publicKey;
+  const atas = mints.map((m) =>
+    getAssociatedTokenAddressSync(m, feeRecipient, true),
+  );
+  const tx = new Transaction().add(
+    ...mints.map((m, i) =>
+      createAssociatedTokenAccountIdempotentInstruction(
+        payer,
+        atas[i],
+        feeRecipient,
+        m,
+      ),
+    ),
+  );
+  const sig = await provider.sendAndConfirm(tx);
+  mints.forEach((m, i) =>
+    console.log(`✓ treasury ATA ${m.toBase58()} → ${atas[i].toBase58()}`),
+  );
+  console.log(`  tx ${sig}\n`);
 }
 
 async function main(): Promise<void> {
@@ -131,6 +166,7 @@ async function main(): Promise<void> {
       .accountsPartial({ config: configPda, authority: signer.publicKey })
       .rpc();
     console.log(`✓ init_config — tx ${sig}\n`);
+    await ensureTreasuryAtas(provider, feeRecipient, wantMints);
     return;
   }
 
@@ -152,6 +188,7 @@ async function main(): Promise<void> {
     console.log(
       "Nothing to reconcile — allowlist already contains every requested mint.\n",
     );
+    await ensureTreasuryAtas(provider, existing.feeRecipient, have);
     return;
   }
   if (!existing.authority.equals(signer.publicKey)) {
@@ -168,6 +205,10 @@ async function main(): Promise<void> {
     console.log(`✓ add_allowed_mint ${mint.toBase58()} — tx ${sig}`);
   }
   console.log();
+  await ensureTreasuryAtas(provider, existing.feeRecipient, [
+    ...have,
+    ...missing,
+  ]);
 }
 
 main().catch((e) => die(e?.message ?? String(e)));

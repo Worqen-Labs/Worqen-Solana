@@ -70,7 +70,7 @@ pub fn handler(ctx: Context<FundPeriodToken>, max_fund_amount: u64) -> Result<()
 
     token::transfer(
         CpiContext::new(
-            ctx.accounts.token_program.to_account_info(),
+            ctx.accounts.token_program.key(),
             Transfer {
                 from: ctx.accounts.employer_token_account.to_account_info(),
                 to: ctx.accounts.vault_token_account.to_account_info(),

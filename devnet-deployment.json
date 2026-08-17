@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Worqen Escrow — devnet deployment manifest. Canonical source for the program ID, upgrade authority, Config PDA, and keypair paths used by CI/deploy scripts and off-chain services. worqen-escrow v1.3.0 (Hourly v2 + instant invoice approval).",
+  "description": "Worqen Escrow \u2014 devnet deployment manifest. Canonical source for the program ID, upgrade authority, Config PDA, and keypair paths used by CI/deploy scripts and off-chain services. worqen-escrow v1.5.0 (SBPFv3 artifact; ATA-diet account lists; Anchor 1.1.2; 47 instructions).",
   "network": "devnet",
   "cluster_rpc": "https://api.devnet.solana.com",
   "explorer": {
@@ -11,13 +11,17 @@
     "id": "FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh",
     "name": "worqen-escrow",
     "account_schema_version": 2,
-    "program_version": "v1.3.0",
-    "anchor_version": "0.32.1",
+    "program_version": "v1.5.0",
+    "deployed_so_sha256": "73ea91040ce236e8486fdcd509540f8e3507cf524547d576a307653bc9050c65",
+    "deployed_so_bytes": 751720,
+    "anchor_version": "1.1.2",
     "keypair_path": "~/.config/solana/worqen-escrow-v2-program.json",
-    "so_path": "target/deploy/worqen_escrow.so",
+    "so_path": "target/deploy-v3/worqen_escrow.so",
     "data_length_bytes": 1103952,
     "programdata_address": "5dGNYXHqDNk83Hch1MUPKGx3CviFcWX5cPKQFHFiZQcw",
-    "bpf_loader": "BPFLoaderUpgradeab1e11111111111111111111111"
+    "bpf_loader": "BPFLoaderUpgradeab1e11111111111111111111111",
+    "sbpf_arch": "v3",
+    "deploy_client_floor": "Agave >= 4.0.0 (SBPFv3)"
   },
   "upgrade_authority": {
     "pubkey": "Gg5L88vFoL32Dw64qXX4SirD8SHPfCjJEqm3Qrjjh6zz",
@@ -46,13 +50,14 @@
     "source_of_truth": "target/idl/worqen_escrow.json",
     "typescript_types": "target/types/worqen_escrow.ts",
     "frontend_copy": "frontend/apps/dashboard/lib/solana-wallet/generated/ (codama client, regenerate via bun run generate:client)",
-    "onchain_idl_account": "2Y1y1m4cEsNT88srWa7k3EkkHXKENT982dKNVyS64aYo"
+    "onchain_idl_account": "D5EDchbfDVyCfgF1SmVTXutyDAiSU4R5ZYWyH3urwXZC",
+    "onchain_idl_note": "Program Metadata Program (ProgM6JCC...) canonical 'idl' seed account, Anchor 1.x; legacy 2Y1y... closed 2026-08-17 (rent recovered). PUBLICATION PENDING: Anchor 1.1.2's chunked write plan is throttled to a truncated stream by the public devnet RPC (HTTP 429; 16+ attempts, incl. priority fees and a local throttling http proxy - the plan also needs ws subscriptions, so a plain http proxy is not enough). TO COMPLETE (2 min with any keyed RPC, e.g. free Helius/QuickNode devnet endpoint): anchor idl close <program> --provider.cluster devnet --provider.wallet ~/.config/solana/devnet-escrow.json; anchor idl init <program> -f target/idl/worqen_escrow.json --provider.cluster <keyed-rpc-url> --provider.wallet ~/.config/solana/devnet-escrow.json. Verify: anchor idl fetch -o /tmp/i.json && python: zlib.decompress(bytes.fromhex(open('/tmp/i.json').read())) parses as JSON. Clients are unaffected (codama client + vendored fixture are the sources of truth)."
   },
   "design": {
     "commission_model": "fee-on-top: employer deposits amount + commission; the employee receives the full `amount`; commission is routed to the Config `fee_recipient` treasury (NOT the platform_authority signing key).",
     "commission_tiers_bps": {
       "standard": 500,
-      "prime": 150,
+      "prime": 300,
       "tip": 200,
       "max_cap": 1000
     },
@@ -60,15 +65,44 @@
       "min": 259200,
       "max": 7776000
     },
-    "instruction_count": 52,
+    "instruction_count": 47,
     "key_roles": {
       "upgrade_authority": "deploy new bytecode (mainnet: multisig)",
-      "config_authority": "Config.authority — pause, allowlist, default fee, treasury (mainnet: multisig; two-step handoff via update_config+accept_authority)",
+      "config_authority": "Config.authority \u2014 pause, allowlist, default fee, treasury (mainnet: multisig; two-step handoff via update_config+accept_authority)",
       "fee_recipient": "treasury, receives all commission, never signs (cold)",
       "platform_authority": "per-escrow hot ops key (backend): resolve disputes, force-release, auto-release"
     }
   },
   "deployment_history": [
+    {
+      "version": "v1.5.0",
+      "deployed_slot": 484755229,
+      "deploy_tx": "64q6nFocfWUf2PU6txjKgMeRAsiSwuoKwENoYzHCfkXS9yfWzhZUnnP3pxaSzALLroqyV1WKBN4vRBMDiHdbFXsh",
+      "deployed_at": "2026-08-17",
+      "notes": [
+        "Size/CU campaign: ATA-constraint diet (18 non-vault associated_token:: constraints -> owner+mint checks; 46 dead account slots removed across 10 token instructions; init_if_needed dropped on payout destinations - DESTINATION ATA CREATION IS NOW THE CALLER'S RESPONSIBILITY, backend/frontend prepend idempotent creates; treasury ATA per allowed mint must exist - bootstrap-config.ts ensures them, done on devnet: 5ViqKdpwxHabGJ8oTxWY4biG9XLdALZjkURMGmBiti5P USDC, C72ZqNq8UA6EaM6yAthirrjSfHioz1VXyyMZJJt9Ym4G EURC).",
+        "Anchor 0.32.1 -> 1.1.2: adds a built-in duplicate-mutable-account guard (new runtime error 2040), drops legacy __idl_* handlers (IDL now published via the Program Metadata Program), JS tooling moved to @anchor-lang/core.",
+        "Deployable artifact is SBPFv3 (cargo build-sbf --arch v3, platform-tools v1.55): 751,720 B vs 905,720 default-arch. Deploys REQUIRE an Agave >= 4.0.0 client; LiteSVM 1.1.0 cannot load v3, so tests run the default-arch build of identical source (16/16 E2E proven on BOTH artifacts).",
+        "Deployed bytes sha256 73ea91040ce236e8486fdcd50954... byte-identical to target/deploy-v3 (verified by dump+trim). Binary 999,496 (v1.4.0) -> 751,720 B; mainnet extend cost drops 2.0845 -> 0.3600 SOL (51,725 B still above the 700,040 B mainnet allocation).",
+        "CU: token instructions -14.5%..-40% vs v1.4.0 medians and fully deterministic (bump-search tail eliminated); deposit_sol +5.6% from the Anchor 1.x duplicate-account guard (kept deliberately as a safety invariant).",
+        "BREAKING for old clients: 10 token instructions have shorter account lists; a v1.4.0-built client misaddresses accounts. Backend/frontend on dev branches are updated; staging services must be redeployed from dev.",
+        "Legacy on-chain IDL account 2Y1y1m4c... closed with anchor-0.32.1 BEFORE the upgrade (ordering trap; rent recovered). New IDL lives at the PMP metadata account D5EDchbf...; publication fought public-RPC 429 throttling - if 'anchor idl fetch' + zlib decompress shows a truncated stream, re-run 'make idl-devnet' until complete."
+      ]
+    },
+    {
+      "version": "v1.4.0",
+      "deployed_slot": 484714948,
+      "deploy_tx": "LYP9WqoEFpXpYG5LJWPg5DZ7mLMAmYmDkM2S1Uw6iPFSNCE5FNtjDDktyAXxkq57agyXD86a6CvnhCMuE59mczB",
+      "deployed_at": "2026-08-17",
+      "notes": [
+        "Security hardening: deposit_sol/deposit_token gained the Config account at position 0 and the !paused gate (pause matrix 13 -> 15 instructions); create_escrow pins platform_authority to Config.platform_authority (6065 InvalidPlatformAuthority) and validates escrow_kind (new 6067 InvalidEscrowKind); open_period requires a platform_signer co-signature alongside the authorizer (closes the period-PDA squat).",
+        "5 callerless instructions REMOVED (52 -> 47): release_partial_sol/_token, deposit_more_sol/_token, close_unfunded_escrow_sol. close_unfunded_escrow_token kept and now built by the backend rent-close task.",
+        "Error codes 6015/6018/6032/6033/6045 retired in place as Reserved6015..Reserved6045 (numbers held, never reused); 6067 reassigned from the never-thrown VaultLeavesDust to InvalidEscrowKind.",
+        "All 28 legacy msg! sites removed; binary 1,068,168 -> 999,496 bytes (fits the existing 1,103,952-byte allocation, no extend). No account layout changes \u2014 Escrow/Config/HourlyPeriod/HourlyInvoice byte-identical.",
+        "Verified post-deploy: on-chain bytes sha256-identical to the local artifact; IDL account upgraded to 1.4.0/47 ix; live-devnet simulations confirm 6067 on unknown kind and 6065 on a foreign create_escrow arbitrator. 95/95 LiteSVM tests; 13/13 backend localnet E2E ran against identical bytecode.",
+        "BREAKING for old clients: deposits need the config account, open_period needs the platform co-signature \u2014 backend/frontend on the dev branches are updated; deployed staging services must be redeployed from dev before hourly funding or deposits will work."
+      ]
+    },
     {
       "version": "v1.3.0",
       "deployed_slot": 484457826,
@@ -88,10 +122,10 @@
       "deployed_at": "2026-08-08",
       "notes": [
         "Hourly v2: per-invoice HourlyInvoice PDAs replace the fixed [Tranche;7] array (unlimited invoices/week); money-cap HourlyPeriod v2 with hire-anchored week window (period_start_at/period_end_at); native SOL + SPL _sol/_token instruction pairs; permissionless finalize/settle/close; 50 instructions.",
-        "NEW PROGRAM ID FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh (could not upgrade 6Ftag in place — original upgrade authority key was lost with the macOS checkout).",
-        "Security fixes (adversarial review): (1) Config.platform_authority pins the named platform on open_period (was vacuously authorized — squat/hostile-arbitrator DoS); (2) fund_period_sol/token gained max_fund_amount to block a raise_weekly_cap front-run; (3) native SOL vault_rent_reserve seeded on first fund so partial payouts never strand the vault below the rent-exempt minimum.",
+        "NEW PROGRAM ID FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh (could not upgrade 6Ftag in place \u2014 original upgrade authority key was lost with the macOS checkout).",
+        "Security fixes (adversarial review): (1) Config.platform_authority pins the named platform on open_period (was vacuously authorized \u2014 squat/hostile-arbitrator DoS); (2) fund_period_sol/token gained max_fund_amount to block a raise_weekly_cap front-run; (3) native SOL vault_rent_reserve seeded on first fund so partial payouts never strand the vault below the rent-exempt minimum.",
         "Verified: 74/74 LiteSVM tests + full backend-builder integration E2E on a live validator (identical bytecode).",
-        "ACCOUNT SCHEMA v2 — old 6Ftag hourly accounts are incompatible; this is a fresh program, no migration."
+        "ACCOUNT SCHEMA v2 \u2014 old 6Ftag hourly accounts are incompatible; this is a fresh program, no migration."
       ]
     },
     {
@@ -100,9 +134,9 @@
       "deploy_tx": "3cBcWi56i1ichvT73hAY8tgUFHtvbcu4qnzc2KcmwqF71pir1A21opoTLTm94tbqmo3rA6c6JH5WZrZBrXQDN2xC",
       "deployed_at": "2026-05-29",
       "notes": [
-        "Worqen Escrow v1.0.0 — initial release (ESCROW_ACCOUNT_VERSION = 1).",
+        "Worqen Escrow v1.0.0 \u2014 initial release (ESCROW_ACCOUNT_VERSION = 1).",
         "New global Config PDA: mint allowlist, pause kill-switch (blocks only new create/deposit/direct-pay, never release/dispute/close), treasury fee_recipient, default commission. Instructions: init_config, update_config, accept_authority, add_allowed_mint, remove_allowed_mint.",
-        "Commission is now FEE-ON-TOP and routed to a dedicated treasury (fee_recipient), snapshotted per escrow at create — decoupled from the platform_authority signing key.",
+        "Commission is now FEE-ON-TOP and routed to a dedicated treasury (fee_recipient), snapshotted per escrow at create \u2014 decoupled from the platform_authority signing key.",
         "Tier-0 security fix: mandatory MINIMUM dispute window (3 days) so a worker can no longer self-dispute and instantly force-release; on-chain deadline bounded to [now+3d, now+90d].",
         "Account additions: escrow_kind (u8), fee_recipient (Pubkey), terms_hash ([u8;32]), reserved ([u8;64]). Event additions: ref_id on EscrowReleased, fee_recipient/escrow_kind/terms_hash on EscrowCreated, ConfigUpdated + MintAllowlistChanged; DirectPaymentMade switched to fee-on-top fields.",
         "Hardening: cancel events report actual remaining amounts; update_platform_authority rejects no-op rotation; close_unfunded_escrow_sol/_token reclaim rent on never-funded escrows; total_deposit() now returns a checked Result.",

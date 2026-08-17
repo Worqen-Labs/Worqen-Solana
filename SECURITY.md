@@ -24,9 +24,16 @@ follows fix-and-deploy on the affected cluster.
 
 In scope:
 
-- The Rust program source in `programs/worqen-escrow/`.
+- The Rust program source in `programs/worqen-escrow/` — 47 instructions across the
+  fixed-price/milestone `Escrow` engine and the hourly v2 `HourlyPeriod` +
+  `HourlyInvoice` engine (v1.5.0, Anchor 1.1.2 — the version devnet runs).
 - The deployed program on Solana devnet:
-  `6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ` (worqen-escrow v1.1.0).
+  `FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh` (worqen-escrow v1.5.0, account
+  schema version 2, deployed 2026-08-17 at slot 484755229, on-chain bytes
+  sha256 `73ea91040ce236e8486fdcd509540f8e3507cf524547d576a307653bc9050c65`).
+  Its mainnet counterpart id
+  `HShWcYbT6wGrndgauQxNrcNJuJQ1BX9CVZqFSn9Q7rNs` (built with `--features mainnet`)
+  is in scope for source review; nothing is deployed there yet.
 - Issues that allow:
   - Theft, freezing, or loss of escrowed funds.
   - Bypassing authorization checks (employer / employee / platform).
@@ -36,8 +43,10 @@ In scope:
 
 Out of scope:
 
-- Superseded prior deployments — the `GDCB…` (v2) and `GVST…` (v1.1)
-  programs predate this `worqen-escrow` rewrite and hold no new funds.
+- Superseded prior deployments — the `6Ftag…` program (worqen-escrow v1.0.0–v1.1.0,
+  devnet, replaced by `Finht…` in v1.2.0 after its upgrade-authority key was lost, so
+  it can never be patched), and the older `GDCB…` (v2) / `GVST…` (v1.1) programs that
+  predate the `worqen-escrow` rewrite. None hold new funds.
 - Off-chain components (frontend, backend RPC, indexers) — those have
   separate disclosure channels.
 - Issues that require a malicious validator, root-level wallet
@@ -91,8 +100,8 @@ Key properties enforced by the on-chain program:
 - **No direct lamport manipulation** — every transfer goes through a
   System Program or SPL Token CPI, with PDA signer-seeds.
 - **Reproducible builds** — pinned toolchain plus `solana-verify`
-  registry submission; see [README.md](./README.md#verification) for
-  the verification procedure.
+  registry submission; see [README.md](./README.md#9-build-test-deploy) for
+  the verification procedure (`make verify-devnet` / `scripts/verify.sh`).
 
 ## On-Chain Security.txt
 
@@ -100,9 +109,43 @@ The deployed program embeds a [`solana-security-txt`][sst] section in
 its `.so` so wallets and explorers can surface this policy directly.
 View it on Solscan:
 
-<https://solscan.io/account/6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ?cluster=devnet>
+<https://solscan.io/account/FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh?cluster=devnet>
 
 [sst]: https://github.com/neodyme-labs/solana-security-txt
+
+## v1.5.0 — Destination token accounts are the caller's responsibility (live on devnet 2026-08-17)
+
+The 18 non-vault `associated_token::mint` / `associated_token::authority`
+constraints are replaced by the `owner` + `mint` idiom the program already used
+for `platform_token_account`, and every `init_if_needed` on a payout destination
+is gone. The three **vault** ATA constraints (`deposit_token`,
+`fund_period_token`, `settle_period_token`) are untouched — there the canonical
+derivation *is* the security binding.
+
+What the program now guarantees about a destination token account is exactly:
+`owner == <employee | employer | fee_recipient from the escrow/period>` and
+`mint == <escrow/period mint>`. It no longer requires the canonical ATA address,
+and it never creates the account. **A missing destination makes the instruction
+fail with `AccountNotInitialized` instead of self-healing**, so every caller must
+prepend an idempotent ATA create (the backend's `ensure_token_accounts`), and
+`scripts/bootstrap-config.ts` now creates the treasury ATA per allowlisted mint.
+
+This removes the accidental subsidy where the platform hot key silently paid
+~0.00204 SOL of unrecoverable rent for each new worker ATA, and drops the
+`token_mint` / pure-derivation `employee` / `employer` / `fee_recipient` /
+`associated_token_program` / `system_program` slots that only existed to feed
+those constraints — a breaking account-list change on 10 instructions (46 slots
+removed in total). Account **structs** and discriminators are unchanged, so no
+stored state migrated.
+
+v1.5.0 also moved the program from Anchor 0.32.1 to **1.1.2**, which adds a
+built-in duplicate-mutable-account guard (**runtime error 2040
+`ConstraintDuplicateMutableAccount`**) and removes the legacy `__idl_*` handlers
+— the on-chain IDL now lives in the Program Metadata Program account
+`D5EDchbfDVyCfgF1SmVTXutyDAiSU4R5ZYWyH3urwXZC`. The deployed artifact is
+**SBPFv3** (751,720 B, `target/deploy-v3/`), which requires an Agave ≥ 4.0.0
+client to upload; the LiteSVM suite (103 tests) exercises the default-arch build
+of identical source.
 
 ## v1.1.0 — Commission retained on non-happy-path settlements (2026-06-01)
 
@@ -124,17 +167,36 @@ than by code (the platform fee no longer depends on the dispute outcome).
 
 ## Operational kill-switch (pause)
 
-The Config PDA carries a `paused` flag. When set, the program rejects every
-instruction that brings *new* money into the system — `create_escrow`,
-`deposit_*`, `pay_with_commission_*` (incl. the batch variants), `open_period`,
-`fund_period_*`, and `raise_weekly_cap` — plus the two hourly instructions that
-move money on a counterparty's say-so rather than on the clock:
-`stage_invoice_*` and `approve_invoice_*`.
+The Config PDA carries a `paused` flag. The gate is structural: `!config.paused` is
+checked by exactly the instructions that take the `Config` account, and by all of them.
+That is **15 instructions** (14 `require!` sites — `stage_invoice_sol` and
+`stage_invoice_token` share `stage_common`):
 
-It can **never** block `release`, `confirm`, `dispute`, `resolve`,
+| Gated instruction | Why |
+|---|---|
+| `create_escrow` | new escrow intake |
+| `deposit_sol` / `_token` | new money into an existing escrow vault |
+| `pay_with_commission_sol` / `_token` | new money, no escrow |
+| `batch_pay_with_commission_sol` / `_token` | same, fanned out |
+| `open_period` | new hourly period |
+| `fund_period_sol` / `_token` | hourly intake |
+| `raise_weekly_cap` | raises the ceiling on future hourly intake |
+| `stage_invoice_sol` / `_token` | new earmark against a period vault |
+| `approve_invoice_sol` / `_token` | payout on a counterparty's say-so, no time lock |
+
+Since v1.4.0 `deposit_sol` and `deposit_token` carry the `Config` account and check the
+flag, closing the hole where a paused program still accepted money into an
+already-created escrow (R-34). `deposit_more_sol` / `deposit_more_token` no longer
+exist — v1.4.0 removed them along with `release_partial_sol` / `_token` and
+`close_unfunded_escrow_sol`, none of which had any caller. The invariant is now
+"pause = no new money enters any vault, no new obligation is created, and nothing gets
+paid out early".
+
+Pause can **never** block `release`, `confirm`, `dispute`, `resolve`,
 `auto_release`, `close`, `mutual_cancel`, `finalize_invoice_*`,
-`settle_period_*`, or `close_period_*`. Pausing therefore halts intake without
-ever stranding funds already in escrow — every party can still withdraw.
+`settle_period_*`, or `close_period_*` — so it can never strand funds already in
+escrow; every party can still withdraw. `tests/hourly.test.ts` asserts this
+explicitly.
 
 `approve_invoice_*` is deliberately inside the gate even though it is a payout
 path. It is the only payout callable at will by a non-platform party with no

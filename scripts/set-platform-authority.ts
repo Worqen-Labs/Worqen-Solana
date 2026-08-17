@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import * as anchor from "@coral-xyz/anchor";
+import * as anchor from "@anchor-lang/core";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";

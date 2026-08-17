@@ -1,6 +1,6 @@
 use crate::errors::EscrowError;
 use crate::events::EscrowCreated;
-use crate::state::{Escrow, EscrowStatus, ESCROW_ACCOUNT_VERSION};
+use crate::state::{escrow_kind, Escrow, EscrowStatus, ESCROW_ACCOUNT_VERSION};
 use anchor_lang::prelude::*;
 
 /// Accounts required for creating a new escrow
@@ -41,7 +41,12 @@ pub struct CreateEscrow<'info> {
     pub employee: UncheckedAccount<'info>,
 
     /// The platform authority for dispute resolution
-    /// CHECK: We only store this pubkey, no data access needed
+    /// CHECK: pinned to config.platform_authority so no caller can name a
+    /// friendly arbitrator; must be set on Config before any escrow is created.
+    #[account(
+        constraint = platform_authority.key() == config.platform_authority
+            && config.platform_authority != Pubkey::default() @ EscrowError::InvalidPlatformAuthority,
+    )]
     pub platform_authority: UncheckedAccount<'info>,
 
     /// The token mint (SystemProgram ID for native SOL)
@@ -79,6 +84,11 @@ pub fn handler(
     require!(
         commission_rate_bps <= Escrow::MAX_COMMISSION_RATE_BPS,
         EscrowError::InvalidCommissionRate
+    );
+
+    require!(
+        escrow_kind::is_known(escrow_kind),
+        EscrowError::InvalidEscrowKind
     );
 
     // Parties must be distinct
@@ -206,16 +216,6 @@ pub fn handler(
         escrow_kind,
         terms_hash,
     });
-
-    msg!(
-        "Escrow created v{} id={:?} amount={} commission={} ({}bps) auto_release_at={}",
-        ESCROW_ACCOUNT_VERSION,
-        escrow_id,
-        amount,
-        commission_amount,
-        commission_rate_bps,
-        auto_release_at
-    );
 
     Ok(())
 }

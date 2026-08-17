@@ -61,7 +61,7 @@ pub fn handler(ctx: Context<ClosePeriodSol>) -> Result<()> {
         let signer_seeds = &[&vault_seeds[..]];
         transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.system_program.key(),
                 Transfer {
                     from: ctx.accounts.escrow_vault.to_account_info(),
                     to: ctx.accounts.employer.to_account_info(),

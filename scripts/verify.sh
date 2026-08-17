@@ -16,12 +16,12 @@
 #
 # USAGE
 #   ./scripts/verify.sh <cluster> <program_id> <repo_url>
-#   e.g. ./scripts/verify.sh devnet 6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ \
+#   e.g. ./scripts/verify.sh devnet FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh \
 #          https://github.com/Worqen-Labs/Worqen-Solana
 set -euo pipefail
 
 CLUSTER="${1:-devnet}"
-PROGRAM_ID="${2:-6FtagT9Xm9b6eBHgDmxggam2KuiQbPYywUXnrs7B2gEJ}"
+PROGRAM_ID="${2:-FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh}"
 REPO_URL="${3:-https://github.com/Worqen-Labs/Worqen-Solana}"
 LIBRARY_NAME="worqen_escrow"
 

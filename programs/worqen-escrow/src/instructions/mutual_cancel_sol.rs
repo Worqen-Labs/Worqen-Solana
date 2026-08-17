@@ -82,7 +82,7 @@ pub fn handler(ctx: Context<MutualCancelSol>, employee_share: u64) -> Result<()>
     if employee_share > 0 {
         transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.system_program.key(),
                 Transfer {
                     from: ctx.accounts.escrow_vault.to_account_info(),
                     to: ctx.accounts.employee.to_account_info(),
@@ -99,7 +99,7 @@ pub fn handler(ctx: Context<MutualCancelSol>, employee_share: u64) -> Result<()>
     if commission_to_treasury > 0 {
         transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.system_program.key(),
                 Transfer {
                     from: ctx.accounts.escrow_vault.to_account_info(),
                     to: ctx.accounts.fee_recipient.to_account_info(),
@@ -116,7 +116,7 @@ pub fn handler(ctx: Context<MutualCancelSol>, employee_share: u64) -> Result<()>
     if total_to_employer > 0 {
         transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.system_program.key(),
                 Transfer {
                     from: ctx.accounts.escrow_vault.to_account_info(),
                     to: ctx.accounts.employer.to_account_info(),
@@ -143,13 +143,6 @@ pub fn handler(ctx: Context<MutualCancelSol>, employee_share: u64) -> Result<()>
         is_native: true,
         token_mint: escrow.token_mint,
     });
-
-    msg!(
-        "Escrow settled: {} to employee, {} to employer, {} commission to treasury",
-        employee_share,
-        total_to_employer,
-        commission_to_treasury
-    );
 
     Ok(())
 }

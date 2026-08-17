@@ -2,8 +2,7 @@ use crate::errors::EscrowError;
 use crate::events::HourlyInvoiceFinalized;
 use crate::state::*;
 use anchor_lang::prelude::*;
-use anchor_spl::associated_token::AssociatedToken;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 #[derive(Accounts)]
 pub struct FinalizeInvoiceToken<'info> {
@@ -22,9 +21,6 @@ pub struct FinalizeInvoiceToken<'info> {
     )]
     pub invoice: Box<Account<'info, HourlyInvoice>>,
 
-    #[account(constraint = token_mint.key() == hourly_period.token_mint @ EscrowError::InvalidTokenMint)]
-    pub token_mint: Box<Account<'info, Mint>>,
-
     #[account(
         mut,
         constraint = vault_token_account.owner == hourly_period.key() @ EscrowError::Unauthorized,
@@ -32,27 +28,17 @@ pub struct FinalizeInvoiceToken<'info> {
     )]
     pub vault_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// CHECK: matched against hourly_period.employee
-    #[account(constraint = employee.key() == hourly_period.employee @ EscrowError::Unauthorized)]
-    pub employee: UncheckedAccount<'info>,
-
     #[account(
-        init_if_needed,
-        payer = caller,
-        associated_token::mint = token_mint,
-        associated_token::authority = employee,
+        mut,
+        constraint = employee_token_account.owner == hourly_period.employee @ EscrowError::Unauthorized,
+        constraint = employee_token_account.mint == hourly_period.token_mint @ EscrowError::InvalidTokenMint,
     )]
     pub employee_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// CHECK: matched against hourly_period.fee_recipient
-    #[account(constraint = fee_recipient.key() == hourly_period.fee_recipient @ EscrowError::InvalidFeeRecipient)]
-    pub fee_recipient: UncheckedAccount<'info>,
-
     #[account(
-        init_if_needed,
-        payer = caller,
-        associated_token::mint = token_mint,
-        associated_token::authority = fee_recipient,
+        mut,
+        constraint = platform_token_account.owner == hourly_period.fee_recipient @ EscrowError::Unauthorized,
+        constraint = platform_token_account.mint == hourly_period.token_mint @ EscrowError::InvalidTokenMint,
     )]
     pub platform_token_account: Box<Account<'info, TokenAccount>>,
 
@@ -63,12 +49,9 @@ pub struct FinalizeInvoiceToken<'info> {
     )]
     pub rent_payer: UncheckedAccount<'info>,
 
-    #[account(mut)]
     pub caller: Signer<'info>,
 
     pub token_program: Program<'info, Token>,
-    pub associated_token_program: Program<'info, AssociatedToken>,
-    pub system_program: Program<'info, System>,
 }
 
 pub fn handler(ctx: Context<FinalizeInvoiceToken>) -> Result<()> {
@@ -102,7 +85,7 @@ pub fn handler(ctx: Context<FinalizeInvoiceToken>) -> Result<()> {
     if amount_net > 0 {
         token::transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.employee_token_account.to_account_info(),
@@ -116,7 +99,7 @@ pub fn handler(ctx: Context<FinalizeInvoiceToken>) -> Result<()> {
     if commission > 0 {
         token::transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.platform_token_account.to_account_info(),

@@ -91,9 +91,9 @@ pub struct EscrowCancelled {
     pub escrow_id: [u8; 32],
     pub cancelled_by: Pubkey,
     pub refunded_to: Pubkey,
-    /// Actual worker amount refunded (remaining, after any partial releases).
+    /// Actual worker amount refunded (whatever is left in the vault).
     pub amount_refunded: u64,
-    /// Actual commission refunded (remaining, after any partial releases).
+    /// Actual commission refunded (whatever is left of it).
     pub commission_refunded: u64,
     pub is_native: bool,
     pub token_mint: Pubkey,

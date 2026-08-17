@@ -66,7 +66,7 @@ pub fn handler(
 
     transfer(
         CpiContext::new(
-            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.system_program.key(),
             Transfer {
                 from: ctx.accounts.payer.to_account_info(),
                 to: ctx.accounts.recipient.to_account_info(),
@@ -79,7 +79,7 @@ pub fn handler(
     if commission_amount > 0 {
         transfer(
             CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.system_program.key(),
                 Transfer {
                     from: ctx.accounts.payer.to_account_info(),
                     to: ctx.accounts.fee_recipient.to_account_info(),
@@ -103,15 +103,6 @@ pub fn handler(
         token_mint: Pubkey::default(),
         paid_at: clock.unix_timestamp,
     });
-
-    msg!(
-        "DirectPaymentSol hire={:?} total={} worker={} commission={} ({}bps)",
-        hire_id,
-        total,
-        amount,
-        commission_amount,
-        commission_bps
-    );
 
     Ok(())
 }

@@ -2,6 +2,7 @@ use anchor_lang::prelude::*;
 
 /// Escrow status enum representing the lifecycle of an escrow
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[borsh(use_discriminant = true)]
 pub enum EscrowStatus {
     /// Escrow created, awaiting deposit
     #[default]
@@ -27,12 +28,17 @@ pub enum EscrowStatus {
 pub mod escrow_kind {
     /// Fixed-price or per-milestone deliverable escrow (default).
     pub const MILESTONE: u8 = 0;
-    /// Hourly / capped-prepaid block drawn down with `release_partial_*`.
+    /// Hourly / capped-prepaid block (hourly v2 uses its own PDAs).
     pub const HOURLY: u8 = 1;
     /// Retainer / ongoing engagement.
     pub const RETAINER: u8 = 2;
     /// Anything else; classify off-chain.
     pub const OTHER: u8 = 255;
+
+    /// Kinds this program version accepts on `create_escrow`.
+    pub fn is_known(kind: u8) -> bool {
+        matches!(kind, MILESTONE | HOURLY | RETAINER | OTHER)
+    }
 }
 
 /// Account schema version. Bump when adding/removing/reordering fields so
@@ -87,8 +93,8 @@ pub struct Escrow {
     /// 200 = tip). - 2 bytes
     pub commission_rate_bps: u16,
 
-    /// Cumulative amount released to employee via partial releases.
-    /// Used by `release_partial_*` and full release / dispute math.
+    /// Cumulative amount already released to the employee. Kept for the
+    /// release / dispute math and for accounts opened before v1.4.0.
     pub released_to_employee: u64,
 
     /// Token mint (SystemProgram ID for SOL) - 32 bytes
@@ -180,16 +186,6 @@ pub struct Escrow {
 }
 
 impl Escrow {
-    /// Default / standard commission rate: 5% = 500 basis points.
-    pub const DEFAULT_COMMISSION_RATE_BPS: u16 = 500;
-
-    /// Prime-subscription employer commission rate: 1.5% = 150 bps.
-    /// Informational — the actual bps is passed per call by the backend.
-    pub const PRIME_COMMISSION_RATE_BPS: u16 = 150;
-
-    /// Tip commission rate: 2% = 200 bps. Informational.
-    pub const TIP_COMMISSION_RATE_BPS: u16 = 200;
-
     /// Maximum commission rate: 10% = 1000 basis points (hard cap).
     pub const MAX_COMMISSION_RATE_BPS: u16 = 1000;
 
@@ -272,12 +268,12 @@ impl Escrow {
             .ok_or(crate::errors::EscrowError::InvalidAmount.into())
     }
 
-    /// Worker amount remaining for release/dispute after partial releases
+    /// Worker amount remaining for release/dispute after anything released
     pub fn remaining_worker_amount(&self) -> u64 {
         self.amount.saturating_sub(self.released_to_employee)
     }
 
-    /// Commission remaining to be paid to platform after partial releases
+    /// Commission remaining to be paid to platform after anything released
     pub fn remaining_commission(&self) -> u64 {
         let already_paid =
             Escrow::calculate_commission(self.released_to_employee, self.commission_rate_bps);

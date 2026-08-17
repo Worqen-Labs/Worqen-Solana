@@ -2,14 +2,13 @@ use crate::errors::EscrowError;
 use crate::events::EscrowSettled;
 use crate::state::{Escrow, EscrowStatus};
 use anchor_lang::prelude::*;
-use anchor_spl::associated_token::AssociatedToken;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 /// Accounts for an amicable settle of a token escrow.
 ///
 /// Both parties sign (no platform authority). Token accounts are constrained
-/// on `mint`/`owner` to prevent fund redirection; payee ATAs use
-/// `init_if_needed` so a 0-balance party can still receive its share.
+/// on `mint`/`owner` to prevent fund redirection; every destination must
+/// already exist — the caller creates them.
 #[derive(Accounts)]
 pub struct MutualCancelToken<'info> {
     #[account(
@@ -23,26 +22,19 @@ pub struct MutualCancelToken<'info> {
     pub escrow: Box<Account<'info, Escrow>>,
 
     #[account(
-        constraint = token_mint.key() == escrow.token_mint @ EscrowError::InvalidTokenMint,
-    )]
-    pub token_mint: Box<Account<'info, Mint>>,
-
-    #[account(
         mut,
         constraint = vault_token_account.owner == escrow.key() @ EscrowError::Unauthorized,
         constraint = vault_token_account.mint == escrow.token_mint @ EscrowError::InvalidTokenMint,
     )]
     pub vault_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// The employer — co-signs the settlement and pays for ATA creation.
-    #[account(mut)]
+    /// The employer — co-signs the settlement.
     pub employer: Signer<'info>,
 
     #[account(
-        init_if_needed,
-        payer = employer,
-        associated_token::mint = token_mint,
-        associated_token::authority = employer,
+        mut,
+        constraint = employer_token_account.owner == escrow.employer @ EscrowError::Unauthorized,
+        constraint = employer_token_account.mint == escrow.token_mint @ EscrowError::InvalidTokenMint,
     )]
     pub employer_token_account: Box<Account<'info, TokenAccount>>,
 
@@ -50,16 +42,11 @@ pub struct MutualCancelToken<'info> {
     pub employee: Signer<'info>,
 
     #[account(
-        init_if_needed,
-        payer = employer,
-        associated_token::mint = token_mint,
-        associated_token::authority = employee,
+        mut,
+        constraint = employee_token_account.owner == escrow.employee @ EscrowError::Unauthorized,
+        constraint = employee_token_account.mint == escrow.token_mint @ EscrowError::InvalidTokenMint,
     )]
     pub employee_token_account: Box<Account<'info, TokenAccount>>,
-
-    /// CHECK: Verified against escrow.fee_recipient
-    #[account(constraint = fee_recipient.key() == escrow.fee_recipient @ EscrowError::InvalidFeeRecipient)]
-    pub fee_recipient: UncheckedAccount<'info>,
 
     /// Treasury token account — receives the commission. Constrained on owner +
     /// mint. The platform keeps its fee on a mutual cancellation.
@@ -71,8 +58,6 @@ pub struct MutualCancelToken<'info> {
     pub platform_token_account: Box<Account<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
-    pub associated_token_program: Program<'info, AssociatedToken>,
-    pub system_program: Program<'info, System>,
 }
 
 /// Employer + employee amicably settle a funded token escrow without a
@@ -102,7 +87,7 @@ pub fn handler(ctx: Context<MutualCancelToken>, employee_share: u64) -> Result<(
     if employee_share > 0 {
         token::transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.employee_token_account.to_account_info(),
@@ -121,7 +106,7 @@ pub fn handler(ctx: Context<MutualCancelToken>, employee_share: u64) -> Result<(
     if commission_to_treasury > 0 {
         token::transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.platform_token_account.to_account_info(),
@@ -139,7 +124,7 @@ pub fn handler(ctx: Context<MutualCancelToken>, employee_share: u64) -> Result<(
     if total_to_employer > 0 {
         token::transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.employer_token_account.to_account_info(),
@@ -167,13 +152,6 @@ pub fn handler(ctx: Context<MutualCancelToken>, employee_share: u64) -> Result<(
         is_native: false,
         token_mint: escrow.token_mint,
     });
-
-    msg!(
-        "Mutual settle: {} tokens to employee, {} tokens to employer, {} commission to treasury",
-        employee_share,
-        total_to_employer,
-        commission_to_treasury
-    );
 
     Ok(())
 }

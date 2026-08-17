@@ -56,7 +56,7 @@ pub fn handler(ctx: Context<CloseEscrowSol>) -> Result<()> {
 
         transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.system_program.key(),
                 Transfer {
                     from: ctx.accounts.escrow_vault.to_account_info(),
                     to: ctx.accounts.employer.to_account_info(),
@@ -66,12 +66,6 @@ pub fn handler(ctx: Context<CloseEscrowSol>) -> Result<()> {
             vault_balance,
         )?;
     }
-
-    msg!(
-        "Escrow {:?} closed; vault dust ({} lamports) and rent refunded to employer",
-        ctx.accounts.escrow.escrow_id,
-        vault_balance
-    );
 
     Ok(())
 }

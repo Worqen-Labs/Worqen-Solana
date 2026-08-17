@@ -47,12 +47,5 @@ pub fn handler(ctx: Context<ConfirmCompletion>) -> Result<()> {
         employee_confirmed: escrow.employee_confirmed,
     });
 
-    msg!(
-        "Completion confirmed by {:?}. Employer: {}, Employee: {}",
-        signer_key,
-        escrow.employer_confirmed,
-        escrow.employee_confirmed
-    );
-
     Ok(())
 }
