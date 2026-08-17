@@ -1,12 +1,16 @@
 use crate::errors::EscrowError;
 use crate::events::EscrowFunded;
-use crate::state::{Escrow, EscrowStatus};
+use crate::state::{Config, Escrow, EscrowStatus, CONFIG_SEED};
 use anchor_lang::prelude::*;
 use anchor_lang::system_program::{transfer, Transfer};
 
 /// Accounts required for depositing native SOL into escrow
 #[derive(Accounts)]
 pub struct DepositSol<'info> {
+    /// Platform config — new money is blocked while paused.
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Box<Account<'info, Config>>,
+
     #[account(
         mut,
         constraint = escrow.status == EscrowStatus::Created @ EscrowError::InvalidStatus,
@@ -32,6 +36,8 @@ pub struct DepositSol<'info> {
 
 /// Deposits native SOL (worker amount + commission) into the escrow vault.
 pub fn handler(ctx: Context<DepositSol>) -> Result<()> {
+    require!(!ctx.accounts.config.paused, EscrowError::ProgramPaused);
+
     let escrow = &mut ctx.accounts.escrow;
     let clock = Clock::get()?;
 
@@ -39,7 +45,7 @@ pub fn handler(ctx: Context<DepositSol>) -> Result<()> {
 
     transfer(
         CpiContext::new(
-            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.system_program.key(),
             Transfer {
                 from: ctx.accounts.employer.to_account_info(),
                 to: ctx.accounts.escrow_vault.to_account_info(),
@@ -59,13 +65,6 @@ pub fn handler(ctx: Context<DepositSol>) -> Result<()> {
         is_native: true,
         token_mint: escrow.token_mint,
     });
-
-    msg!(
-        "Deposited {} lamports into escrow vault (worker: {}, commission: {})",
-        total_deposit,
-        escrow.amount,
-        escrow.commission_amount
-    );
 
     Ok(())
 }

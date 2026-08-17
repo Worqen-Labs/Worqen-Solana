@@ -78,11 +78,5 @@ pub fn handler(ctx: Context<RaiseDispute>, reason: Vec<u8>, dispute_deadline: i6
         dispute_deadline,
     });
 
-    msg!(
-        "Dispute raised by {:?} deadline={}",
-        signer_key,
-        dispute_deadline
-    );
-
     Ok(())
 }

@@ -20,7 +20,7 @@ on:
 
 env:
   SOLANA_VERSION: "4.0.0"
-  ANCHOR_VERSION: "0.32.1"
+  ANCHOR_VERSION: "1.1.2"
 
 jobs:
   verifiable-build:
@@ -39,41 +39,71 @@ jobs:
 
       - name: Install Anchor (avm)
         run: |
-          cargo install --git https://github.com/coral-xyz/anchor avm --force --locked
+          cargo install --git https://github.com/solana-foundation/anchor avm --force --locked
           avm install ${ANCHOR_VERSION}
           avm use ${ANCHOR_VERSION}
 
       - name: Install solana-verify
         run: cargo install solana-verify --locked
 
-      - name: Reproducible build (Docker)
-        run: solana-verify build --library-name worqen_escrow -- --features mainnet
-
       - uses: oven-sh/setup-bun@v2
       - name: IDL (for distribution)
         run: bun install --frozen-lockfile && anchor build -- --features mainnet
 
+      # The artifact that is actually uploaded on-chain: SBPFv3, ~154 KB smaller
+      # than the default arch. Built before the Docker step, which overwrites
+      # target/deploy and may leave root-owned paths behind.
+      - name: Build the SBPFv3 deployable (mainnet id)
+        run: |
+          make build-deploy SBF_FEATURES="--features mainnet"
+          mkdir -p dist
+          cp target/deploy-v3/worqen_escrow.so dist/worqen_escrow.v3.so
+
+      # The reproducible artifact backing `solana-verify verify-from-repo`.
+      # solana-verify pins its own container toolchain and has no --arch knob,
+      # so this is a DEFAULT-ARCH build and its hash does NOT match the v3 bytes
+      # written to the mainnet buffer. Publish both; see CLAUDE.md.
+      - name: Reproducible build (Docker, default arch)
+        run: solana-verify build --library-name worqen_escrow -- --features mainnet
+
       - name: Hashes + checksums
         run: |
-          mkdir -p dist
+          set -euo pipefail
           cp target/deploy/worqen_escrow.so dist/
           cp target/idl/worqen_escrow.json dist/
           solana-verify get-executable-hash target/deploy/worqen_escrow.so | tee dist/program-hash.txt
-          (cd dist && sha256sum worqen_escrow.so worqen_escrow.json > SHA256SUMS.txt)
+          solana-verify get-executable-hash dist/worqen_escrow.v3.so | tee dist/program-hash-v3.txt
+          (cd dist && sha256sum worqen_escrow.so worqen_escrow.v3.so worqen_escrow.json > SHA256SUMS.txt)
+          {
+            echo "| artifact | bytes |"
+            echo "|---|--:|"
+            echo "| worqen_escrow.so (reproducible, default arch) | $(stat -c '%s' dist/worqen_escrow.so) |"
+            echo "| worqen_escrow.v3.so (deployed bytes) | $(stat -c '%s' dist/worqen_escrow.v3.so) |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/worqen_escrow.so
+            dist/worqen_escrow.v3.so
             dist/worqen_escrow.json
             dist/program-hash.txt
+            dist/program-hash-v3.txt
             dist/SHA256SUMS.txt
           generate_release_notes: true
           body: |
-            Reproducible build of Worqen Escrow ${{ github.ref_name }}.
-            Verify with: `solana-verify verify-from-repo --remote -um --program-id <ID> --library-name worqen_escrow ${{ github.server_url }}/${{ github.repository }} -- --features mainnet`
-            Program hash: see `program-hash.txt`.
+            Worqen Escrow ${{ github.ref_name }} — two artifacts, on purpose.
+
+            - `worqen_escrow.v3.so` (`program-hash-v3.txt`) is the SBPFv3 build that the
+              mainnet buffer carries and that the multisig upgrade writes on-chain.
+              It needs an Agave >= 4.0.0 client and a cluster with SIMD-0377 active.
+            - `worqen_escrow.so` (`program-hash.txt`) is the reproducible default-arch
+              build for source verification:
+              `solana-verify verify-from-repo --remote -um --program-id <ID> --library-name worqen_escrow ${{ github.server_url }}/${{ github.repository }} -- --features mainnet`
+
+            The two hashes differ by construction — solana-verify has no `--arch` knob,
+            so on-chain `solana-verify` verification of the v3 bytes is not available yet.
 
   mainnet-buffer:
     name: Write verified buffer for the multisig (manual approval)
@@ -93,8 +123,11 @@ jobs:
       - name: Install solana-verify
         run: cargo install solana-verify --locked
 
-      - name: Reproducible build (Docker)
-        run: solana-verify build --library-name worqen_escrow -- --features mainnet
+      # The buffer carries the SBPFv3 bytes — same build the release publishes as
+      # worqen_escrow.v3.so. cargo build-sbf is deterministic for a pinned
+      # --tools-version, so this reproduces the release asset byte-for-byte.
+      - name: Build the SBPFv3 deployable (mainnet id)
+        run: make build-deploy SBF_FEATURES="--features mainnet"
 
       - name: Load buffer fee-payer
         run: |
@@ -105,7 +138,9 @@ jobs:
       - name: Write buffer + hand authority to the multisig
         run: |
           set -euo pipefail
-          BUFFER=$(solana program write-buffer target/deploy/worqen_escrow.so --output json | python3 -c "import sys,json;print(json.load(sys.stdin)['buffer'])")
+          SO=target/deploy-v3/worqen_escrow.so
+          HASH=$(solana-verify get-executable-hash "$SO")
+          BUFFER=$(solana program write-buffer "$SO" --output json | python3 -c "import sys,json;print(json.load(sys.stdin)['buffer'])")
           echo "Buffer: $BUFFER"
           solana program set-buffer-authority "$BUFFER" --new-buffer-authority "${{ secrets.MAINNET_UPGRADE_MULTISIG }}"
           echo "## Mainnet upgrade buffer ready" >> "$GITHUB_STEP_SUMMARY"
@@ -113,6 +148,8 @@ jobs:
           echo "- program id: \`${{ secrets.MAINNET_PROGRAM_ID }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- buffer: \`$BUFFER\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- buffer authority: \`${{ secrets.MAINNET_UPGRADE_MULTISIG }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- bytes: SBPFv3, $(stat -c '%s' "$SO") B, executable hash \`$HASH\` (matches \`program-hash-v3.txt\`)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ProgramData must hold $(( $(stat -c '%s' "$SO") + 45 )) B — \`solana program extend\` first if the account is smaller" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Scrub payer key
         if: always()

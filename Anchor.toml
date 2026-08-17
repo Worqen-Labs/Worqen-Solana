@@ -15,8 +15,6 @@ worqen_escrow = "FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh"
 [programs.mainnet]
 worqen_escrow = "HShWcYbT6wGrndgauQxNrcNJuJQ1BX9CVZqFSn9Q7rNs"
 
-[registry]
-url = "https://api.apr.dev"
 
 [provider]
 cluster = "localnet"

@@ -92,7 +92,7 @@ pub fn handler(ctx: Context<CancelEscrowSol>, reason: Vec<u8>) -> Result<()> {
     if commission_to_treasury > 0 {
         transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.system_program.key(),
                 Transfer {
                     from: ctx.accounts.escrow_vault.to_account_info(),
                     to: ctx.accounts.fee_recipient.to_account_info(),
@@ -109,7 +109,7 @@ pub fn handler(ctx: Context<CancelEscrowSol>, reason: Vec<u8>) -> Result<()> {
     if refund_amount > 0 {
         transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.system_program.key(),
                 Transfer {
                     from: ctx.accounts.escrow_vault.to_account_info(),
                     to: ctx.accounts.employer.to_account_info(),
@@ -138,13 +138,6 @@ pub fn handler(ctx: Context<CancelEscrowSol>, reason: Vec<u8>) -> Result<()> {
         is_native: true,
         token_mint: escrow.token_mint,
     });
-
-    msg!(
-        "Escrow cancelled by {:?}: {} lamports to employer, {} commission to treasury",
-        signer_key,
-        refund_amount,
-        commission_to_treasury
-    );
 
     Ok(())
 }

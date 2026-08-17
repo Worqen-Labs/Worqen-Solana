@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import * as anchor from "@coral-xyz/anchor";
+import * as anchor from "@anchor-lang/core";
 import {
   AccountLayout,
   ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -27,7 +27,7 @@ const IDL = JSON.parse(
   fs.readFileSync("target/idl/worqen_escrow.json", "utf8"),
 );
 const PROGRAM_ID = new PublicKey(IDL.address);
-const SO_PATH = "target/deploy/worqen_escrow.so";
+const SO_PATH = process.env.WORQEN_SO_PATH ?? "target/deploy/worqen_escrow.so";
 
 const seed = (s: string) => Buffer.from(s);
 const rand32 = () => Array.from(Keypair.generate().publicKey.toBytes());
@@ -85,6 +85,18 @@ function expectFail(
   if (!logs.includes(code)) {
     throw new Error(`expected error "${code}" in logs but got:\n${logs}`);
   }
+}
+
+function expectUnsignedFail(ixs: TransactionInstruction[], signers: Keypair[]) {
+  svm.expireBlockhash();
+  const tx = new Transaction().add(...ixs);
+  tx.recentBlockhash = svm.latestBlockhash();
+  tx.feePayer = payer.publicKey;
+  tx.sign(payer, ...signers);
+  const res = svm.sendLegacyTransaction(
+    tx.serialize({ requireAllSignatures: false, verifySignatures: false }),
+  );
+  expect(res.constructor.name).toBe("FailedTransactionMetadata");
 }
 
 function accountOf(pk: PublicKey): any {
@@ -203,12 +215,56 @@ type Parties = {
   platform: Keypair;
 };
 
-function newParties(): Parties {
+/**
+ * Since v1.5.0 the program never creates a destination token account, so the
+ * employee ATA is pre-created here exactly as the backend's
+ * `ensure_token_accounts` prepends it. Pass `false` to exercise the
+ * missing-destination path.
+ */
+function newParties(createEmployeeAta = true): Parties {
   const employer = fundedKeypair(500);
   const employee = fundedKeypair(10);
   const employerAta = mintTo(employer.publicKey);
-  const employeeAta = getAssociatedTokenAddressSync(mint, employee.publicKey);
+  const employeeAta = createEmployeeAta
+    ? mintTo(employee.publicKey, 0)
+    : getAssociatedTokenAddressSync(mint, employee.publicKey);
   return { employer, employerAta, employee, employeeAta, platform };
+}
+
+/** A fresh 6-decimal mint, for wrong-mint negatives. */
+function newMint(): PublicKey {
+  const kp = Keypair.generate();
+  const rent = svm.minimumBalanceForRentExemption(BigInt(MINT_SIZE));
+  send(
+    [
+      SystemProgram.createAccount({
+        fromPubkey: payer.publicKey,
+        newAccountPubkey: kp.publicKey,
+        space: MINT_SIZE,
+        lamports: Number(rent),
+        programId: TOKEN_PROGRAM_ID,
+      }),
+      createInitializeMint2Instruction(kp.publicKey, 6, payer.publicKey, null),
+    ],
+    [kp],
+  );
+  return kp.publicKey;
+}
+
+/** Create an empty ATA for `owner` on an arbitrary mint. */
+function ensureAtaOn(mintPk: PublicKey, ownerPk: PublicKey): PublicKey {
+  const ata = getAssociatedTokenAddressSync(mintPk, ownerPk);
+  if (accountOf(ata) === null) {
+    send([
+      createAssociatedTokenAccountInstruction(
+        payer.publicKey,
+        ata,
+        ownerPk,
+        mintPk,
+      ),
+    ]);
+  }
+  return ata;
 }
 
 type Ctx = Parties & {
@@ -276,6 +332,7 @@ async function openIx(
     employer?: PublicKey;
     employee?: PublicKey;
     platform?: PublicKey;
+    platformSigner?: PublicKey;
     feeRecipient?: PublicKey;
     tokenMint?: PublicKey;
     isNative?: boolean;
@@ -308,6 +365,7 @@ async function openIx(
       tokenMint:
         o.tokenMint ?? (isNative ? SystemProgram.programId : (mint as any)),
       authorizer: (o.authorizer ?? ctx.employer).publicKey,
+      platformSigner: o.platformSigner ?? ctx.platform.publicKey,
       systemProgram: SystemProgram.programId,
     })
     .instruction();
@@ -315,7 +373,7 @@ async function openIx(
 
 async function open(ctx: Ctx, authorizer?: Keypair) {
   const signer = authorizer ?? ctx.employer;
-  send([await openIx(ctx, { authorizer: signer })], [signer]);
+  send([await openIx(ctx, { authorizer: signer })], [signer, ctx.platform]);
   ctx.rentPayer = signer;
 }
 
@@ -429,7 +487,13 @@ async function disputeIx(
 async function finalizeIx(
   ctx: Ctx,
   index: number,
-  o: { caller?: Keypair; period?: PublicKey; vault?: PublicKey } = {},
+  o: {
+    caller?: Keypair;
+    period?: PublicKey;
+    vault?: PublicKey;
+    employeeTokenAccount?: PublicKey;
+    platformTokenAccount?: PublicKey;
+  } = {},
 ): Promise<TransactionInstruction> {
   const caller = o.caller ?? ctx.platform;
   const period = o.period ?? ctx.period;
@@ -454,17 +518,12 @@ async function finalizeIx(
     .accountsPartial({
       hourlyPeriod: period,
       invoice: invoicePda(ctx.period, index),
-      tokenMint: mint,
       vaultTokenAccount: vault,
-      employee: ctx.employee.publicKey,
-      employeeTokenAccount: ctx.employeeAta,
-      feeRecipient: treasury.publicKey,
-      platformTokenAccount: treasuryAta,
+      employeeTokenAccount: o.employeeTokenAccount ?? ctx.employeeAta,
+      platformTokenAccount: o.platformTokenAccount ?? treasuryAta,
       rentPayer: ctx.platform.publicKey,
       caller: caller.publicKey,
       tokenProgram: TOKEN_PROGRAM_ID,
-      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
     })
     .instruction();
 }
@@ -499,17 +558,12 @@ async function approveIx(
       config: configPda,
       hourlyPeriod: period,
       invoice: invoicePda(ctx.period, index),
-      tokenMint: mint,
       vaultTokenAccount: vault,
-      employee: ctx.employee.publicKey,
       employeeTokenAccount: ctx.employeeAta,
-      feeRecipient: treasury.publicKey,
       platformTokenAccount: treasuryAta,
       rentPayer: ctx.platform.publicKey,
       approver: approver.publicKey,
       tokenProgram: TOKEN_PROGRAM_ID,
-      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
     })
     .instruction();
 }
@@ -542,19 +596,13 @@ async function resolveIx(
     .accountsPartial({
       hourlyPeriod: ctx.period,
       invoice: invoicePda(ctx.period, index),
-      tokenMint: mint,
       vaultTokenAccount: ctx.vault,
-      employer: ctx.employer.publicKey,
       employerTokenAccount: ctx.employerAta,
-      employee: ctx.employee.publicKey,
       employeeTokenAccount: ctx.employeeAta,
-      feeRecipient: treasury.publicKey,
       platformTokenAccount: treasuryAta,
       rentPayer: ctx.platform.publicKey,
       platformAuthority: resolver.publicKey,
       tokenProgram: TOKEN_PROGRAM_ID,
-      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
     })
     .instruction();
 }
@@ -585,17 +633,12 @@ async function autoReleaseIx(
     .accountsPartial({
       hourlyPeriod: ctx.period,
       invoice: invoicePda(ctx.period, index),
-      tokenMint: mint,
       vaultTokenAccount: ctx.vault,
-      employee: ctx.employee.publicKey,
       employeeTokenAccount: ctx.employeeAta,
-      feeRecipient: treasury.publicKey,
       platformTokenAccount: treasuryAta,
       rentPayer: ctx.platform.publicKey,
       caller: c.publicKey,
       tokenProgram: TOKEN_PROGRAM_ID,
-      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
     })
     .instruction();
 }
@@ -623,7 +666,6 @@ async function settleIx(
       hourlyPeriod: ctx.period,
       tokenMint: mint,
       vaultTokenAccount: ctx.vault,
-      employer: ctx.employer.publicKey,
       employerTokenAccount: ctx.employerAta,
       caller: c.publicKey,
       tokenProgram: TOKEN_PROGRAM_ID,
@@ -655,15 +697,12 @@ async function closeIx(
     .closePeriodToken()
     .accountsPartial({
       hourlyPeriod: ctx.period,
-      tokenMint: mint,
       vaultTokenAccount: ctx.vault,
       employer: ctx.employer.publicKey,
       employerTokenAccount: ctx.employerAta,
       rentPayer: ctx.rentPayer.publicKey,
       caller: c.publicKey,
       tokenProgram: TOKEN_PROGRAM_ID,
-      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
     })
     .instruction();
 }
@@ -805,7 +844,7 @@ describe("hourly v2 token: open_period", () => {
     const stranger = fundedKeypair();
     expectFail(
       [await openIx(ctx, { authorizer: stranger })],
-      [stranger],
+      [stranger, ctx.platform],
       "Unauthorized",
     );
   });
@@ -814,7 +853,7 @@ describe("hourly v2 token: open_period", () => {
     const ctx = newCtx();
     expectFail(
       [await openIx(ctx, { employee: ctx.employer.publicKey })],
-      [ctx.employer],
+      [ctx.employer, ctx.platform],
       "EmployeeIsEmployer",
     );
   });
@@ -823,7 +862,7 @@ describe("hourly v2 token: open_period", () => {
     const ctx = newCtx();
     expectFail(
       [await openIx(ctx, { bps: 1001 })],
-      [ctx.employer],
+      [ctx.employer, ctx.platform],
       "InvalidCommissionRate",
     );
   });
@@ -832,7 +871,7 @@ describe("hourly v2 token: open_period", () => {
     const ctx = newCtx();
     expectFail(
       [await openIx(ctx, { duration: DAY - 1 })],
-      [ctx.employer],
+      [ctx.employer, ctx.platform],
       "InvalidPeriodWindow",
     );
   });
@@ -841,7 +880,7 @@ describe("hourly v2 token: open_period", () => {
     const ctx = newCtx();
     expectFail(
       [await openIx(ctx, { duration: 31 * DAY })],
-      [ctx.employer],
+      [ctx.employer, ctx.platform],
       "InvalidPeriodWindow",
     );
   });
@@ -850,7 +889,7 @@ describe("hourly v2 token: open_period", () => {
     const ctx = newCtx();
     expectFail(
       [await openIx(ctx, { startAt: now() - 8 * DAY, duration: 7 * DAY })],
-      [ctx.employer],
+      [ctx.employer, ctx.platform],
       "PeriodEnded",
     );
   });
@@ -859,7 +898,7 @@ describe("hourly v2 token: open_period", () => {
     const ctx = newCtx();
     expectFail(
       [await openIx(ctx, { feeRecipient: Keypair.generate().publicKey })],
-      [ctx.employer],
+      [ctx.employer, ctx.platform],
       "InvalidFeeRecipient",
     );
   });
@@ -872,6 +911,7 @@ describe("hourly v2 token: open_period", () => {
         await openIx(ctx, {
           authorizer: stranger,
           platform: stranger.publicKey,
+          platformSigner: stranger.publicKey,
         }),
       ],
       [stranger],
@@ -885,18 +925,39 @@ describe("hourly v2 token: open_period", () => {
     const hostile = fundedKeypair();
     expectFail(
       [await openIx(ctx, { platform: hostile.publicKey })],
-      [ctx.employer],
+      [ctx.employer, ctx.platform],
       "InvalidPlatformAuthority",
     );
     expect(exists(ctx.period)).toBe(false);
 
-    send([await openIx(ctx, { authorizer: ctx.employer })], [ctx.employer]);
+    send(
+      [await openIx(ctx, { authorizer: ctx.employer })],
+      [ctx.employer, ctx.platform],
+    );
     const p = decodePeriod(ctx.period);
     expect(p.platformAuthority.toBase58()).toBe(platform.publicKey.toBase58());
     expect(p.platformAuthority.toBase58()).toBe(
       decodeConfig().platformAuthority.toBase58(),
     );
     expect(p.rentPayer.toBase58()).toBe(ctx.employer.publicKey.toBase58());
+  });
+
+  test("a period PDA cannot be squatted without the platform co-signature", async () => {
+    const ctx = newCtx();
+    const squatter = fundedKeypair();
+
+    expectFail(
+      [await openIx(ctx, { platformSigner: squatter.publicKey })],
+      [ctx.employer, squatter],
+      "InvalidPlatformAuthority",
+    );
+    expect(exists(ctx.period)).toBe(false);
+
+    expectUnsignedFail([await openIx(ctx)], [ctx.employer]);
+    expect(exists(ctx.period)).toBe(false);
+
+    send([await openIx(ctx)], [ctx.employer, ctx.platform]);
+    expect(statusOf(decodePeriod(ctx.period).status)).toBe("open");
   });
 
   test("open is blocked until config.platform_authority is set", async () => {
@@ -908,12 +969,12 @@ describe("hourly v2 token: open_period", () => {
 
     expectFail(
       [await openIx(ctx, { platform: platform.publicKey })],
-      [ctx.employer],
+      [ctx.employer, platform],
       "InvalidPlatformAuthority",
     );
     expectFail(
       [await openIx(ctx, { platform: PublicKey.default })],
-      [ctx.employer],
+      [ctx.employer, platform],
       "InvalidPlatformAuthority",
     );
     expect(exists(ctx.period)).toBe(false);
@@ -929,7 +990,11 @@ describe("hourly v2 token: open_period", () => {
   test("open is blocked while the program is paused", async () => {
     const ctx = newCtx();
     await setPaused(true);
-    expectFail([await openIx(ctx)], [ctx.employer], "ProgramPaused");
+    expectFail(
+      [await openIx(ctx)],
+      [ctx.employer, ctx.platform],
+      "ProgramPaused",
+    );
     await setPaused(false);
     await open(ctx);
     expect(statusOf(decodePeriod(ctx.period).status)).toBe("open");
@@ -1632,6 +1697,86 @@ describe("hourly v2 token: settle_period_token + close_period_token", () => {
   });
 });
 
+describe("hourly v2 token: caller-owned destination token accounts", () => {
+  test("a wrong-owner employee token account is rejected (Unauthorized)", async () => {
+    const ctx = await openFunded();
+    const amt = new BN(200_000);
+    const i0 = await stage(ctx, amt);
+    warpBy(REVIEW + 1);
+
+    const strangerAta = mintTo(fundedKeypair().publicKey, 0);
+    const vaultBefore = tokenBalance(ctx.vault);
+    expectFail(
+      [await finalizeIx(ctx, i0, { employeeTokenAccount: strangerAta })],
+      [ctx.platform],
+      "Unauthorized",
+    );
+    expect(tokenBalance(strangerAta)).toBe(0n);
+    expect(tokenBalance(ctx.vault)).toBe(vaultBefore);
+    expect(exists(invoicePda(ctx.period, i0))).toBe(true);
+  });
+
+  test("a wrong-mint employee token account is rejected (InvalidTokenMint)", async () => {
+    const ctx = await openFunded();
+    const i0 = await stage(ctx, new BN(200_000));
+    warpBy(REVIEW + 1);
+
+    const wrongMintAta = ensureAtaOn(newMint(), ctx.employee.publicKey);
+    expectFail(
+      [await finalizeIx(ctx, i0, { employeeTokenAccount: wrongMintAta })],
+      [ctx.platform],
+      "InvalidTokenMint",
+    );
+    expect(exists(invoicePda(ctx.period, i0))).toBe(true);
+  });
+
+  test("a wrong-owner treasury token account is rejected (Unauthorized)", async () => {
+    const ctx = await openFunded();
+    const i0 = await stage(ctx, new BN(200_000));
+    warpBy(REVIEW + 1);
+
+    const fakeTreasuryAta = mintTo(fundedKeypair().publicKey, 0);
+    expectFail(
+      [await finalizeIx(ctx, i0, { platformTokenAccount: fakeTreasuryAta })],
+      [ctx.platform],
+      "Unauthorized",
+    );
+    expect(tokenBalance(fakeTreasuryAta)).toBe(0n);
+    expect(exists(invoicePda(ctx.period, i0))).toBe(true);
+  });
+
+  test("a missing employee token account fails cleanly (AccountNotInitialized)", async () => {
+    const ctx = await openFunded({ parties: newParties(false) });
+    const amt = new BN(200_000);
+    const i0 = await stage(ctx, amt);
+    warpBy(REVIEW + 1);
+    expect(accountOf(ctx.employeeAta)).toBeNull();
+
+    expectFail(
+      [await finalizeIx(ctx, i0)],
+      [ctx.platform],
+      "AccountNotInitialized",
+    );
+    expect(exists(invoicePda(ctx.period, i0))).toBe(true);
+
+    // The caller creates it and the same instruction now settles.
+    send(
+      [
+        createAssociatedTokenAccountInstruction(
+          payer.publicKey,
+          ctx.employeeAta,
+          ctx.employee.publicKey,
+          mint,
+        ),
+        await finalizeIx(ctx, i0),
+      ],
+      [ctx.platform],
+    );
+    expect(tokenBalance(ctx.employeeAta)).toBe(BigInt(amt.toString()));
+    expect(exists(invoicePda(ctx.period, i0))).toBe(false);
+  });
+});
+
 describe("hourly v2: marginal commission rounding", () => {
   test("per-invoice commissions round cumulatively and sum to commission(total staged)", async () => {
     const capNet = new BN(666_666);
@@ -1850,7 +1995,11 @@ describe("hourly v2: pause invariants", () => {
 
     await setPaused(true);
 
-    expectFail([await openIx(fresh)], [fresh.employer], "ProgramPaused");
+    expectFail(
+      [await openIx(fresh)],
+      [fresh.employer, fresh.platform],
+      "ProgramPaused",
+    );
     expectFail([await fundIx(unfunded)], [unfunded.employer], "ProgramPaused");
     expectFail([await stageIx(ctx, amt)], [ctx.platform], "ProgramPaused");
     expectFail(

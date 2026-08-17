@@ -95,7 +95,7 @@ pub fn handler(
 
     token::transfer(
         CpiContext::new(
-            ctx.accounts.token_program.to_account_info(),
+            ctx.accounts.token_program.key(),
             Transfer {
                 from: ctx.accounts.payer_token_account.to_account_info(),
                 to: ctx.accounts.recipient_token_account.to_account_info(),
@@ -108,7 +108,7 @@ pub fn handler(
     if commission_amount > 0 {
         token::transfer(
             CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.payer_token_account.to_account_info(),
                     to: ctx.accounts.platform_token_account.to_account_info(),
@@ -133,16 +133,6 @@ pub fn handler(
         token_mint: ctx.accounts.token_mint.key(),
         paid_at: clock.unix_timestamp,
     });
-
-    msg!(
-        "DirectPaymentToken hire={:?} total={} worker={} commission={} ({}bps) mint={}",
-        hire_id,
-        total,
-        amount,
-        commission_amount,
-        commission_bps,
-        ctx.accounts.token_mint.key()
-    );
 
     Ok(())
 }

@@ -48,8 +48,8 @@ pub enum EscrowError {
     #[msg("Cancellation reason exceeds maximum length")]
     CancellationReasonTooLong,
 
-    #[msg("Auto-release deadline has not been reached")]
-    AutoReleaseNotReached,
+    #[msg("Reserved error code")]
+    Reserved6015,
 
     #[msg("Auto-release is not configured for this escrow")]
     AutoReleaseNotConfigured,
@@ -57,8 +57,8 @@ pub enum EscrowError {
     #[msg("Dispute deadline has not been reached")]
     DisputeDeadlineNotReached,
 
-    #[msg("Partial release exceeds remaining worker amount")]
-    PartialReleaseTooLarge,
+    #[msg("Reserved error code")]
+    Reserved6018,
 
     #[msg("sequence_in_group must be in [1, total_in_group] when grouped")]
     InvalidGroupSequence,
@@ -103,12 +103,11 @@ pub enum EscrowError {
     #[msg("is_native and token_mint must be consistent")]
     IsNativeMintMismatch,
 
-    /// Solana rejects an account left below rent-exempt minimum but above zero.
-    #[msg("Partial release would leave vault below rent-exempt minimum; release in full or adjust amount")]
-    PartialReleaseLeavesDust,
+    #[msg("Reserved error code")]
+    Reserved6032,
 
-    #[msg("Token vault is non-empty; transfer remaining tokens before closing")]
-    VaultNotEmpty,
+    #[msg("Reserved error code")]
+    Reserved6033,
 
     /// Too short a window would let a party force-resolve before the platform can mediate.
     #[msg("dispute_deadline is sooner than the minimum allowed window")]
@@ -145,8 +144,8 @@ pub enum EscrowError {
     #[msg("Batch payment must have at least one recipient")]
     EmptyBatch,
 
-    #[msg("Top-up requires the escrow to be Funded")]
-    TopUpNotFunded,
+    #[msg("Reserved error code")]
+    Reserved6045,
 
     #[msg("Staged amount would exceed the weekly cap")]
     WeeklyCapExceeded,
@@ -211,6 +210,6 @@ pub enum EscrowError {
     #[msg("Funding amount exceeds the caller-supplied maximum")]
     FundExceedsMax,
 
-    #[msg("Payout would leave the SOL vault below the rent-exempt minimum")]
-    VaultLeavesDust,
+    #[msg("escrow_kind is not a known kind")]
+    InvalidEscrowKind,
 }

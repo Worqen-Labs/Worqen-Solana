@@ -36,8 +36,8 @@ pub struct BatchPayWithCommissionSol<'info> {
 
 /// Pays each recipient `amounts[i]` in full and charges `commission_bps` once
 /// on the total. `hire_id` is an opaque tag for off-chain indexers.
-pub fn handler<'c: 'info, 'info>(
-    ctx: Context<'_, '_, 'c, 'info, BatchPayWithCommissionSol<'info>>,
+pub fn handler<'info>(
+    ctx: Context<'info, BatchPayWithCommissionSol<'info>>,
     hire_id: [u8; 32],
     amounts: Vec<u64>,
     commission_bps: u16,
@@ -75,7 +75,7 @@ pub fn handler<'c: 'info, 'info>(
 
         transfer(
             CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.system_program.key(),
                 Transfer {
                     from: ctx.accounts.payer.to_account_info(),
                     to: recip.clone(),
@@ -89,7 +89,7 @@ pub fn handler<'c: 'info, 'info>(
     if commission_amount > 0 {
         transfer(
             CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.system_program.key(),
                 Transfer {
                     from: ctx.accounts.payer.to_account_info(),
                     to: ctx.accounts.fee_recipient.to_account_info(),
@@ -112,15 +112,6 @@ pub fn handler<'c: 'info, 'info>(
         token_mint: Pubkey::default(),
         paid_at: clock.unix_timestamp,
     });
-
-    msg!(
-        "BatchPaymentSol hire={:?} recipients={} total_worker={} commission={} ({}bps)",
-        hire_id,
-        amounts.len(),
-        total_worker,
-        commission_amount,
-        commission_bps
-    );
 
     Ok(())
 }

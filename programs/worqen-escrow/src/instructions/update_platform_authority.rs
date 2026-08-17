@@ -49,11 +49,5 @@ pub fn handler(ctx: Context<UpdatePlatformAuthority>) -> Result<()> {
         new_authority: new_auth,
     });
 
-    msg!(
-        "Platform authority rotated: {:?} -> {:?}",
-        old_auth,
-        new_auth
-    );
-
     Ok(())
 }

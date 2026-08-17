@@ -2,10 +2,10 @@ use crate::errors::EscrowError;
 use crate::events::DisputeResolved;
 use crate::state::{Escrow, EscrowStatus};
 use anchor_lang::prelude::*;
-use anchor_spl::associated_token::AssociatedToken;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
-/// Accounts for triggering auto-release of a token escrow.
+/// Accounts for triggering auto-release of a token escrow. Every destination
+/// must already exist — the caller creates them.
 #[derive(Accounts)]
 pub struct TriggerAutoReleaseToken<'info> {
     #[account(
@@ -16,44 +16,25 @@ pub struct TriggerAutoReleaseToken<'info> {
     pub escrow: Box<Account<'info, Escrow>>,
 
     #[account(
-        constraint = token_mint.key() == escrow.token_mint @ EscrowError::InvalidTokenMint,
-    )]
-    pub token_mint: Box<Account<'info, Mint>>,
-
-    #[account(
         mut,
         constraint = vault_token_account.owner == escrow.key() @ EscrowError::Unauthorized,
         constraint = vault_token_account.mint == escrow.token_mint @ EscrowError::InvalidTokenMint,
     )]
     pub vault_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// CHECK: Verified against escrow.employee
-    #[account(constraint = employee.key() == escrow.employee @ EscrowError::Unauthorized)]
-    pub employee: UncheckedAccount<'info>,
-
     #[account(
-        init_if_needed,
-        payer = caller,
-        associated_token::mint = token_mint,
-        associated_token::authority = employee,
+        mut,
+        constraint = employee_token_account.owner == escrow.employee @ EscrowError::Unauthorized,
+        constraint = employee_token_account.mint == escrow.token_mint @ EscrowError::InvalidTokenMint,
     )]
     pub employee_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// CHECK: Verified against escrow.employer
-    #[account(constraint = employer.key() == escrow.employer @ EscrowError::Unauthorized)]
-    pub employer: UncheckedAccount<'info>,
-
     #[account(
-        init_if_needed,
-        payer = caller,
-        associated_token::mint = token_mint,
-        associated_token::authority = employer,
+        mut,
+        constraint = employer_token_account.owner == escrow.employer @ EscrowError::Unauthorized,
+        constraint = employer_token_account.mint == escrow.token_mint @ EscrowError::InvalidTokenMint,
     )]
     pub employer_token_account: Box<Account<'info, TokenAccount>>,
-
-    /// CHECK: Verified against escrow.fee_recipient
-    #[account(constraint = fee_recipient.key() == escrow.fee_recipient @ EscrowError::InvalidFeeRecipient)]
-    pub fee_recipient: UncheckedAccount<'info>,
 
     /// Treasury token account — receives the commission. Constrained on owner +
     /// mint so the platform fee cannot be redirected.
@@ -64,12 +45,9 @@ pub struct TriggerAutoReleaseToken<'info> {
     )]
     pub platform_token_account: Box<Account<'info, TokenAccount>>,
 
-    #[account(mut)]
     pub caller: Signer<'info>,
 
     pub token_program: Program<'info, Token>,
-    pub associated_token_program: Program<'info, AssociatedToken>,
-    pub system_program: Program<'info, System>,
 }
 
 /// After the dispute deadline, anyone can release the full remaining worker
@@ -99,7 +77,7 @@ pub fn handler(ctx: Context<TriggerAutoReleaseToken>) -> Result<()> {
     if remaining_worker > 0 {
         token::transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.employee_token_account.to_account_info(),
@@ -118,7 +96,7 @@ pub fn handler(ctx: Context<TriggerAutoReleaseToken>) -> Result<()> {
     if commission_to_treasury > 0 {
         token::transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.platform_token_account.to_account_info(),
@@ -136,7 +114,7 @@ pub fn handler(ctx: Context<TriggerAutoReleaseToken>) -> Result<()> {
     if dust_to_employer > 0 {
         token::transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.employer_token_account.to_account_info(),
@@ -167,12 +145,6 @@ pub fn handler(ctx: Context<TriggerAutoReleaseToken>) -> Result<()> {
         token_mint: escrow.token_mint,
         forced: true,
     });
-
-    msg!(
-        "Auto-release triggered: {} tokens to employee, {} commission to treasury",
-        remaining_worker,
-        commission_to_treasury
-    );
 
     Ok(())
 }

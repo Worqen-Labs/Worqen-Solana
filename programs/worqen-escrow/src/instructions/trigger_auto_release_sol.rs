@@ -86,7 +86,7 @@ pub fn handler(ctx: Context<TriggerAutoReleaseSol>) -> Result<()> {
     if remaining_worker > 0 {
         transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.system_program.key(),
                 Transfer {
                     from: ctx.accounts.escrow_vault.to_account_info(),
                     to: ctx.accounts.employee.to_account_info(),
@@ -103,7 +103,7 @@ pub fn handler(ctx: Context<TriggerAutoReleaseSol>) -> Result<()> {
     if commission_to_treasury > 0 {
         transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.system_program.key(),
                 Transfer {
                     from: ctx.accounts.escrow_vault.to_account_info(),
                     to: ctx.accounts.fee_recipient.to_account_info(),
@@ -119,7 +119,7 @@ pub fn handler(ctx: Context<TriggerAutoReleaseSol>) -> Result<()> {
     if dust_to_employer > 0 {
         transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
+                ctx.accounts.system_program.key(),
                 Transfer {
                     from: ctx.accounts.escrow_vault.to_account_info(),
                     to: ctx.accounts.employer.to_account_info(),
@@ -149,12 +149,6 @@ pub fn handler(ctx: Context<TriggerAutoReleaseSol>) -> Result<()> {
         token_mint: escrow.token_mint,
         forced: true,
     });
-
-    msg!(
-        "Auto-release triggered: {} to employee, {} commission to treasury",
-        remaining_worker,
-        commission_to_treasury
-    );
 
     Ok(())
 }

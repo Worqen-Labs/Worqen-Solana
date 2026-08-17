@@ -4,6 +4,7 @@ pub const HOURLY_PERIOD_VERSION: u8 = 2;
 pub const HOURLY_INVOICE_VERSION: u8 = 1;
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[borsh(use_discriminant = true)]
 pub enum HourlyStatus {
     #[default]
     Open = 0,
@@ -13,6 +14,7 @@ pub enum HourlyStatus {
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[borsh(use_discriminant = true)]
 pub enum InvoiceStatus {
     #[default]
     Staged = 0,
@@ -89,7 +91,6 @@ impl HourlyPeriod {
         + 64;
 
     pub const HOURLY_SEED: &'static [u8] = b"hourly";
-    pub const DEFAULT_REVIEW_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
     pub const MAX_REVIEW_WINDOW_SECS: i64 = 30 * 24 * 60 * 60;
     pub const MIN_PERIOD_DURATION_SECS: i64 = 24 * 60 * 60;
     pub const MAX_PERIOD_DURATION_SECS: i64 = 30 * 24 * 60 * 60;

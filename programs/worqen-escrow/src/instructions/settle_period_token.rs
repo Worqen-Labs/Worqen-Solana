@@ -26,15 +26,10 @@ pub struct SettlePeriodToken<'info> {
     )]
     pub vault_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// CHECK: matched against hourly_period.employer
-    #[account(constraint = employer.key() == hourly_period.employer @ EscrowError::Unauthorized)]
-    pub employer: UncheckedAccount<'info>,
-
     #[account(
-        init_if_needed,
-        payer = caller,
-        associated_token::mint = token_mint,
-        associated_token::authority = employer,
+        mut,
+        constraint = employer_token_account.owner == hourly_period.employer @ EscrowError::Unauthorized,
+        constraint = employer_token_account.mint == hourly_period.token_mint @ EscrowError::InvalidTokenMint,
     )]
     pub employer_token_account: Box<Account<'info, TokenAccount>>,
 
@@ -76,7 +71,7 @@ pub fn handler(ctx: Context<SettlePeriodToken>) -> Result<()> {
         let signer_seeds = &[&period_seeds[..]];
         token::transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.employer_token_account.to_account_info(),

@@ -18,7 +18,7 @@ security_txt! {
     policy: "https://github.com/Worqen-Labs/Worqen-Solana/blob/master/SECURITY.md",
     preferred_languages: "en",
     source_code: "https://github.com/Worqen-Labs/Worqen-Solana",
-    source_release: "v1.3.0",
+    source_release: "v1.5.0",
     auditors: "Pending external audit"
 }
 
@@ -145,24 +145,6 @@ pub mod worqen_escrow {
         instructions::release_token::handler(ctx, ref_id)
     }
 
-    /// Release `amount` SOL to employee now, keeping the rest escrowed.
-    pub fn release_partial_sol(
-        ctx: Context<ReleasePartialSol>,
-        amount: u64,
-        ref_id: [u8; 32],
-    ) -> Result<()> {
-        instructions::release_partial_sol::handler(ctx, amount, ref_id)
-    }
-
-    /// Release `amount` SPL tokens to employee now, keeping the rest.
-    pub fn release_partial_token(
-        ctx: Context<ReleasePartialToken>,
-        amount: u64,
-        ref_id: [u8; 32],
-    ) -> Result<()> {
-        instructions::release_partial_token::handler(ctx, amount, ref_id)
-    }
-
     /// Raise a dispute, freezing funds. `dispute_deadline` is mandatory and
     /// must be within [now + 3 days, now + 90 days].
     pub fn raise_dispute(
@@ -225,13 +207,8 @@ pub mod worqen_escrow {
         instructions::close_escrow_token::handler(ctx)
     }
 
-    /// Close a never-funded (Cancelled-from-Created) SOL escrow to reclaim
-    /// its account rent. No vault is involved.
-    pub fn close_unfunded_escrow_sol(ctx: Context<CloseUnfundedEscrowSol>) -> Result<()> {
-        instructions::close_unfunded_escrow_sol::handler(ctx)
-    }
-
-    /// Token variant: close a never-funded escrow (no vault ATA was created).
+    /// Close a never-funded (Cancelled-from-Created) escrow to reclaim its
+    /// account rent. No vault ATA was ever created.
     pub fn close_unfunded_escrow_token(ctx: Context<CloseUnfundedEscrowToken>) -> Result<()> {
         instructions::close_unfunded_escrow_token::handler(ctx)
     }
@@ -258,26 +235,12 @@ pub mod worqen_escrow {
         instructions::pay_with_commission_token::handler(ctx, hire_id, amount, commission_bps)
     }
 
-    /// Top up a Funded SOL escrow (retainer/hourly): raises amount +
-    /// commission and moves the delta into the vault. Employer signs.
-    pub fn deposit_more_sol(ctx: Context<DepositMoreSol>, additional_amount: u64) -> Result<()> {
-        instructions::deposit_more_sol::handler(ctx, additional_amount)
-    }
-
-    /// Token variant of `deposit_more_sol`.
-    pub fn deposit_more_token(
-        ctx: Context<DepositMoreToken>,
-        additional_amount: u64,
-    ) -> Result<()> {
-        instructions::deposit_more_token::handler(ctx, additional_amount)
-    }
-
     /// Direct pay (fee-on-top) split across many recipients in one atomic tx
     /// (teams / referral fees). Recipient SOL accounts are passed via
     /// remaining_accounts; `amounts[i]` is recipient i's net; one commission on
     /// the total goes to the treasury. Subject to the pause switch.
     pub fn batch_pay_with_commission_sol<'info>(
-        ctx: Context<'_, '_, 'info, 'info, BatchPayWithCommissionSol<'info>>,
+        ctx: Context<'info, BatchPayWithCommissionSol<'info>>,
         hire_id: [u8; 32],
         amounts: Vec<u64>,
         commission_bps: u16,
@@ -287,7 +250,7 @@ pub mod worqen_escrow {
 
     /// Token variant: recipient ATAs passed via remaining_accounts.
     pub fn batch_pay_with_commission_token<'info>(
-        ctx: Context<'_, '_, 'info, 'info, BatchPayWithCommissionToken<'info>>,
+        ctx: Context<'info, BatchPayWithCommissionToken<'info>>,
         hire_id: [u8; 32],
         amounts: Vec<u64>,
         commission_bps: u16,

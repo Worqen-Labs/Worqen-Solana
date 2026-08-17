@@ -1,6 +1,6 @@
 use crate::errors::EscrowError;
 use crate::events::EscrowFunded;
-use crate::state::{Escrow, EscrowStatus};
+use crate::state::{Config, Escrow, EscrowStatus, CONFIG_SEED};
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
@@ -8,6 +8,10 @@ use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 /// Accounts required for depositing SPL tokens into escrow
 #[derive(Accounts)]
 pub struct DepositToken<'info> {
+    /// Platform config — new money is blocked while paused.
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Box<Account<'info, Config>>,
+
     /// The escrow account
     #[account(
         mut,
@@ -54,6 +58,8 @@ pub struct DepositToken<'info> {
 
 /// Deposits SPL tokens (worker amount + commission) into the escrow vault.
 pub fn handler(ctx: Context<DepositToken>) -> Result<()> {
+    require!(!ctx.accounts.config.paused, EscrowError::ProgramPaused);
+
     let escrow = &mut ctx.accounts.escrow;
     let clock = Clock::get()?;
 
@@ -61,7 +67,7 @@ pub fn handler(ctx: Context<DepositToken>) -> Result<()> {
 
     token::transfer(
         CpiContext::new(
-            ctx.accounts.token_program.to_account_info(),
+            ctx.accounts.token_program.key(),
             Transfer {
                 from: ctx.accounts.employer_token_account.to_account_info(),
                 to: ctx.accounts.vault_token_account.to_account_info(),
@@ -82,13 +88,6 @@ pub fn handler(ctx: Context<DepositToken>) -> Result<()> {
         is_native: false,
         token_mint: escrow.token_mint,
     });
-
-    msg!(
-        "Deposited {} tokens into escrow vault (worker: {}, commission: {})",
-        total_deposit,
-        escrow.amount,
-        escrow.commission_amount
-    );
 
     Ok(())
 }

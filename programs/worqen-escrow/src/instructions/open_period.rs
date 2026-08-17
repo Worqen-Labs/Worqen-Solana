@@ -49,6 +49,14 @@ pub struct OpenPeriod<'info> {
     )]
     pub authorizer: Signer<'info>,
 
+    /// Platform co-signature: without it nobody can squat a period PDA and
+    /// block a hire-week. Redundant with `authorizer` when the platform opens.
+    #[account(
+        constraint = platform_signer.key() == config.platform_authority
+            && config.platform_authority != Pubkey::default() @ EscrowError::InvalidPlatformAuthority,
+    )]
+    pub platform_signer: Signer<'info>,
+
     pub system_program: Program<'info, System>,
 }
 

@@ -21,7 +21,7 @@ concurrency:
 
 env:
   SOLANA_VERSION: "4.0.0"
-  ANCHOR_VERSION: "0.32.1"
+  ANCHOR_VERSION: "1.1.2"
   CLUSTER_URL: "https://api.devnet.solana.com"
 
 jobs:
@@ -40,7 +40,7 @@ jobs:
 
       - name: Install Anchor (avm)
         run: |
-          cargo install --git https://github.com/coral-xyz/anchor avm --force --locked
+          cargo install --git https://github.com/solana-foundation/anchor avm --force --locked
           avm install ${ANCHOR_VERSION}
           avm use ${ANCHOR_VERSION}
 
@@ -48,8 +48,15 @@ jobs:
       - name: Install JS deps
         run: bun install --frozen-lockfile
 
-      - name: Build
+      # Two artifacts: `anchor build` gives the IDL plus the default-arch .so the
+      # LiteSVM smoke test loads; `make build-deploy` gives the SBPFv3 .so that
+      # is actually uploaded (~154 KB smaller). Anchor's CLI pins its own
+      # platform-tools, so the arch flags cannot go through `anchor build`.
+      - name: Build (IDL + LiteSVM artifact)
         run: anchor build
+
+      - name: Build the SBPFv3 deployable
+        run: make build-deploy
 
       - name: Resolve program id
         id: pid
@@ -65,21 +72,35 @@ jobs:
           solana config set --url "$CLUSTER_URL" --keypair /tmp/authority.json
           echo "Authority: $(solana address -k /tmp/authority.json)  balance: $(solana balance)"
 
-      - name: Upgrade program
+      # SBPFv3 uploads need an Agave >= 4.0.0 client AND a cluster that has
+      # activated SIMD-0377. The CLI refuses the upload against a cluster that
+      # has not, so a stale devnet fails this step instead of bricking the
+      # program.
+      - name: Upgrade program (SBPFv3 artifact)
         run: |
-          anchor upgrade target/deploy/worqen_escrow.so \
+          anchor upgrade target/deploy-v3/worqen_escrow.so \
             --program-id ${{ steps.pid.outputs.program_id }} \
             --provider.cluster "$CLUSTER_URL" \
             --provider.wallet /tmp/authority.json
 
+      # Anchor 1.x stores the IDL in the Program Metadata Program, not in a
+      # program-owned legacy account, so the first run after the upgrade has
+      # nothing to upgrade and must `init` instead. See solana/CLAUDE.md for the
+      # one-time `anchor-0.32.1 idl close` that must precede the 1.x rollout.
       - name: Refresh on-chain IDL
         run: |
           anchor idl upgrade ${{ steps.pid.outputs.program_id }} \
             -f target/idl/worqen_escrow.json \
             --provider.cluster "$CLUSTER_URL" \
+            --provider.wallet /tmp/authority.json \
+          || anchor idl init ${{ steps.pid.outputs.program_id }} \
+            -f target/idl/worqen_escrow.json \
+            --provider.cluster "$CLUSTER_URL" \
             --provider.wallet /tmp/authority.json
 
-      - name: Smoke test the built artifact (LiteSVM, in-process)
+      # LiteSVM 1.1.0 cannot load an SBPFv3 .so, so the smoke test runs against
+      # the default-arch build of the same source, not the uploaded bytes.
+      - name: Smoke test the built artifact (LiteSVM, in-process, default arch)
         run: bun test
 
       - name: Scrub authority key

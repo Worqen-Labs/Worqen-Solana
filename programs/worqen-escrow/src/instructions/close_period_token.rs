@@ -2,8 +2,7 @@ use crate::errors::EscrowError;
 use crate::events::HourlyPeriodClosed;
 use crate::state::*;
 use anchor_lang::prelude::*;
-use anchor_spl::associated_token::AssociatedToken;
-use anchor_spl::token::{self, CloseAccount, Mint, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, CloseAccount, Token, TokenAccount, Transfer};
 
 #[derive(Accounts)]
 pub struct ClosePeriodToken<'info> {
@@ -16,9 +15,6 @@ pub struct ClosePeriodToken<'info> {
     )]
     pub hourly_period: Box<Account<'info, HourlyPeriod>>,
 
-    #[account(constraint = token_mint.key() == hourly_period.token_mint @ EscrowError::InvalidTokenMint)]
-    pub token_mint: Box<Account<'info, Mint>>,
-
     #[account(
         mut,
         constraint = vault_token_account.owner == hourly_period.key() @ EscrowError::Unauthorized,
@@ -26,7 +22,7 @@ pub struct ClosePeriodToken<'info> {
     )]
     pub vault_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// CHECK: matched against hourly_period.employer; receives swept tokens + vault ATA rent
+    /// CHECK: matched against hourly_period.employer; receives the vault ATA rent
     #[account(
         mut,
         constraint = employer.key() == hourly_period.employer @ EscrowError::Unauthorized,
@@ -34,10 +30,9 @@ pub struct ClosePeriodToken<'info> {
     pub employer: UncheckedAccount<'info>,
 
     #[account(
-        init_if_needed,
-        payer = caller,
-        associated_token::mint = token_mint,
-        associated_token::authority = employer,
+        mut,
+        constraint = employer_token_account.owner == hourly_period.employer @ EscrowError::Unauthorized,
+        constraint = employer_token_account.mint == hourly_period.token_mint @ EscrowError::InvalidTokenMint,
     )]
     pub employer_token_account: Box<Account<'info, TokenAccount>>,
 
@@ -48,12 +43,9 @@ pub struct ClosePeriodToken<'info> {
     )]
     pub rent_payer: UncheckedAccount<'info>,
 
-    #[account(mut)]
     pub caller: Signer<'info>,
 
     pub token_program: Program<'info, Token>,
-    pub associated_token_program: Program<'info, AssociatedToken>,
-    pub system_program: Program<'info, System>,
 }
 
 pub fn handler(ctx: Context<ClosePeriodToken>) -> Result<()> {
@@ -82,7 +74,7 @@ pub fn handler(ctx: Context<ClosePeriodToken>) -> Result<()> {
     if swept > 0 {
         token::transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.employer_token_account.to_account_info(),
@@ -95,7 +87,7 @@ pub fn handler(ctx: Context<ClosePeriodToken>) -> Result<()> {
     }
 
     token::close_account(CpiContext::new_with_signer(
-        ctx.accounts.token_program.to_account_info(),
+        ctx.accounts.token_program.key(),
         CloseAccount {
             account: ctx.accounts.vault_token_account.to_account_info(),
             destination: ctx.accounts.employer.to_account_info(),

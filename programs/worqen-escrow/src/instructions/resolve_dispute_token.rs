@@ -2,13 +2,11 @@ use crate::errors::EscrowError;
 use crate::events::DisputeResolved;
 use crate::state::{Escrow, EscrowStatus};
 use anchor_lang::prelude::*;
-use anchor_spl::associated_token::AssociatedToken;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 /// Accounts for resolving a token dispute. Token accounts are constrained on
-/// mint and owner to prevent fund redirection; party ATAs use `init_if_needed`
-/// (platform pays, refundable via `close_escrow_token`) so 0-balance parties
-/// can still receive their shares.
+/// mint and owner to prevent fund redirection; every destination must already
+/// exist — the caller creates them.
 #[derive(Accounts)]
 pub struct ResolveDisputeToken<'info> {
     /// The escrow account
@@ -21,44 +19,25 @@ pub struct ResolveDisputeToken<'info> {
     pub escrow: Box<Account<'info, Escrow>>,
 
     #[account(
-        constraint = token_mint.key() == escrow.token_mint @ EscrowError::InvalidTokenMint,
-    )]
-    pub token_mint: Box<Account<'info, Mint>>,
-
-    #[account(
         mut,
         constraint = vault_token_account.owner == escrow.key() @ EscrowError::Unauthorized,
         constraint = vault_token_account.mint == escrow.token_mint @ EscrowError::InvalidTokenMint,
     )]
     pub vault_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// CHECK: Verified against escrow.employer
-    #[account(constraint = employer.key() == escrow.employer @ EscrowError::Unauthorized)]
-    pub employer: UncheckedAccount<'info>,
-
     #[account(
-        init_if_needed,
-        payer = platform_authority,
-        associated_token::mint = token_mint,
-        associated_token::authority = employer,
+        mut,
+        constraint = employer_token_account.owner == escrow.employer @ EscrowError::Unauthorized,
+        constraint = employer_token_account.mint == escrow.token_mint @ EscrowError::InvalidTokenMint,
     )]
     pub employer_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// CHECK: Verified against escrow.employee
-    #[account(constraint = employee.key() == escrow.employee @ EscrowError::Unauthorized)]
-    pub employee: UncheckedAccount<'info>,
-
     #[account(
-        init_if_needed,
-        payer = platform_authority,
-        associated_token::mint = token_mint,
-        associated_token::authority = employee,
+        mut,
+        constraint = employee_token_account.owner == escrow.employee @ EscrowError::Unauthorized,
+        constraint = employee_token_account.mint == escrow.token_mint @ EscrowError::InvalidTokenMint,
     )]
     pub employee_token_account: Box<Account<'info, TokenAccount>>,
-
-    /// CHECK: Verified against escrow.fee_recipient
-    #[account(constraint = fee_recipient.key() == escrow.fee_recipient @ EscrowError::InvalidFeeRecipient)]
-    pub fee_recipient: UncheckedAccount<'info>,
 
     /// Treasury token account — receives the commission. Constrained on owner +
     /// mint so the platform fee cannot be redirected. The platform keeps its fee
@@ -70,13 +49,9 @@ pub struct ResolveDisputeToken<'info> {
     )]
     pub platform_token_account: Box<Account<'info, TokenAccount>>,
 
-    /// The platform authority — pays for ATA creation if needed.
-    #[account(mut)]
     pub platform_authority: Signer<'info>,
 
     pub token_program: Program<'info, Token>,
-    pub associated_token_program: Program<'info, AssociatedToken>,
-    pub system_program: Program<'info, System>,
 }
 
 /// Platform resolves a dispute by splitting the remaining worker amount and
@@ -107,7 +82,7 @@ pub fn handler(ctx: Context<ResolveDisputeToken>, employee_share: u64) -> Result
     if employee_share > 0 {
         token::transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.employee_token_account.to_account_info(),
@@ -126,7 +101,7 @@ pub fn handler(ctx: Context<ResolveDisputeToken>, employee_share: u64) -> Result
     if commission_to_treasury > 0 {
         token::transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.platform_token_account.to_account_info(),
@@ -144,7 +119,7 @@ pub fn handler(ctx: Context<ResolveDisputeToken>, employee_share: u64) -> Result
     if total_to_employer > 0 {
         token::transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.employer_token_account.to_account_info(),
@@ -175,13 +150,6 @@ pub fn handler(ctx: Context<ResolveDisputeToken>, employee_share: u64) -> Result
         token_mint: escrow.token_mint,
         forced: false,
     });
-
-    msg!(
-        "Dispute resolved: {} tokens to employee, {} tokens to employer, {} commission to treasury",
-        employee_share,
-        total_to_employer,
-        commission_to_treasury
-    );
 
     Ok(())
 }

@@ -60,7 +60,7 @@ pub fn handler(ctx: Context<CloseEscrowToken>) -> Result<()> {
     if vault_balance > 0 {
         token::transfer(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program.key(),
                 Transfer {
                     from: ctx.accounts.vault_token_account.to_account_info(),
                     to: ctx.accounts.employer_token_account.to_account_info(),
@@ -74,7 +74,7 @@ pub fn handler(ctx: Context<CloseEscrowToken>) -> Result<()> {
 
     // Close the vault token account; rent goes to employer.
     token::close_account(CpiContext::new_with_signer(
-        ctx.accounts.token_program.to_account_info(),
+        ctx.accounts.token_program.key(),
         CloseAccount {
             account: ctx.accounts.vault_token_account.to_account_info(),
             destination: ctx.accounts.employer.to_account_info(),
@@ -82,12 +82,6 @@ pub fn handler(ctx: Context<CloseEscrowToken>) -> Result<()> {
         },
         signer_seeds,
     ))?;
-
-    msg!(
-        "Token escrow {:?} closed; {} tokens swept, all rent refunded to employer",
-        escrow_id,
-        vault_balance
-    );
 
     Ok(())
 }
