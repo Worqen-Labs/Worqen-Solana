@@ -165,6 +165,20 @@ must pass them in IDL order, and any path that creates the treasury ATA must do
 so idempotently. The anti-stall property is now preserved operationally rather
 than by code (the platform fee no longer depends on the dispute outcome).
 
+**This policy is engine-specific, not program-wide.** It governs the
+fixed-price/milestone escrow engine only — `resolve_dispute_sol/token`,
+`trigger_auto_release_sol/token`, `cancel_escrow_sol/token`,
+`mutual_cancel_sol/token`: on all four, the platform keeps the *full remaining*
+commission on the escrow and refunds nothing to the employer, regardless of how
+much of the worker's share was actually paid out. The hourly per-invoice engine
+does the opposite: `resolve_invoice_sol/token` (dispute resolution for an
+`HourlyInvoice`) charges commission only on the `employee_share` actually
+awarded — `commission(employee_share)` — and refunds the unearned remainder of
+the invoice's pre-computed commission to the employer alongside their share of
+the principal. Finance and reconciliation code must not assume "commission is
+never refunded" as a program-wide invariant: it holds for fixed-price/milestone
+non-happy-path settlements and does not hold for hourly invoice resolution.
+
 ## Operational kill-switch (pause)
 
 The Config PDA carries a `paused` flag. The gate is structural: `!config.paused` is
