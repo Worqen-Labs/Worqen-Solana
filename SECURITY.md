@@ -31,9 +31,12 @@ In scope:
   `FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh` (worqen-escrow v1.5.0, account
   schema version 2, deployed 2026-08-17 at slot 484755229, on-chain bytes
   sha256 `73ea91040ce236e8486fdcd509540f8e3507cf524547d576a307653bc9050c65`).
-  Its mainnet counterpart id
+  Its mainnet counterpart
   `HShWcYbT6wGrndgauQxNrcNJuJQ1BX9CVZqFSn9Q7rNs` (built with `--features mainnet`)
-  is in scope for source review; nothing is deployed there yet.
+  is **live on mainnet-beta** — deployed 2026-06-02, upgraded to v1.5.0 on
+  2026-08-24 (slot 441429606, on-chain bytes sha256
+  `2b37e5881d319834762f52736a99d12e9d605c60537fda4e6441c53a09b42c6f`) — and
+  holds real escrows.
 - Issues that allow:
   - Theft, freezing, or loss of escrowed funds.
   - Bypassing authorization checks (employer / employee / platform).
