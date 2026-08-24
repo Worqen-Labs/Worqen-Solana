@@ -133,7 +133,7 @@ async function main(): Promise<void> {
   }
 
   const sig = await program.methods
-    .updateConfig(null, null, target, null)
+    .updateConfig(null, null, target, null, null)
     .accountsPartial({ config: configPda, authority: signer.publicKey })
     .rpc();
 
