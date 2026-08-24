@@ -38,3 +38,10 @@ dist/
 # Keys / secrets (never commit a keypair)
 *-keypair.json
 *.pem
+
+# Internal ops docs — local only, purged from public history 2026-08-24
+CLAUDE.md
+MAINNET.md
+MAINNET_RUNBOOK.md
+HOURLY_V2_DESIGN.md
+.claude/
