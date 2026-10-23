@@ -50,8 +50,9 @@ Out of scope:
   devnet, replaced by `Finht…` in v1.2.0 after its upgrade-authority key was lost, so
   it can never be patched), and the older `GDCB…` (v2) / `GVST…` (v1.1) programs that
   predate the `worqen-escrow` rewrite. None hold new funds.
-- Off-chain components (frontend, backend RPC, indexers) — those have
-  separate disclosure channels.
+- Off-chain components (worqen.com, the API, indexers) are outside this
+  program's scope; report them to security@worqen.com under the same
+  process.
 - Issues that require a malicious validator, root-level wallet
   compromise, or social engineering of the platform's upgrade
   authority — outside the on-chain trust boundary.
@@ -63,8 +64,10 @@ Out of scope:
 1. Report received → acknowledged within 72h.
 2. We reproduce and assess severity (Critical / High / Medium / Low).
 3. Fix is developed on a private branch with the reporter looped in.
-4. Fix is deployed to devnet, then audited internally; mainnet
-   deployment follows external review.
+4. Fix is deployed to devnet and reviewed internally, then upgraded on
+   mainnet through the Squads upgrade authority (see "Mainnet key
+   custody" below). No independent external review is part of this
+   process today.
 5. Public disclosure with credit to the reporter (unless they request
    anonymity).
 
@@ -72,8 +75,7 @@ Out of scope:
 
 A formal bounty program is **not yet active**. We do, however, offer
 discretionary rewards for high-quality reports of in-scope issues,
-sized to severity. Once mainnet is live, a public bounty will replace
-this discretionary tier.
+sized to severity.
 
 ## Past Audits
 
@@ -81,7 +83,10 @@ this discretionary tier.
 |------------|------------------|---------------------------------------|-------------|
 | 2026-05-29 | Internal (multi-agent) | worqen-escrow v1 — all 33 instructions + account/Config schema | On request  |
 | 2026-06-01 | Internal (pre-mainnet) | Commission-retention v1.1.0 + money-path review | On request  |
-| TBD        | External               | mainnet candidate                     | _Pending_   |
+| -          | Independent external   | mainnet program (v1.5.0 is live)      | _None done yet_ |
+
+No independent audit of this program has been done. The two rows above are
+internal reviews only.
 
 ## Security Architecture
 
@@ -102,17 +107,26 @@ Key properties enforced by the on-chain program:
   future at write time.
 - **No direct lamport manipulation** — every transfer goes through a
   System Program or SPL Token CPI, with PDA signer-seeds.
-- **Reproducible builds** — pinned toolchain plus `solana-verify`
-  registry submission; see [README.md](./README.md#9-build-test-deploy) for
-  the verification procedure (`make verify-devnet` / `scripts/verify.sh`).
+- **Reproducible builds** — pinned toolchain; `release.yml` produces a
+  reproducible `solana-verify` build and hashes for tagged releases. The
+  latest published release is v1.0.0; the live v1.5.0 has no tagged
+  release yet, and on-chain source verification of the deployed SBPFv3
+  bytes is an open gap. See
+  [README.md](./README.md#9-build-test-deploy) for the verification
+  procedure (`make verify-devnet` / `scripts/verify.sh`).
 
 ## On-Chain Security.txt
 
 The deployed program embeds a [`solana-security-txt`][sst] section in
 its `.so` so wallets and explorers can surface this policy directly.
-View it on Solscan:
+View it on Solscan (mainnet, then devnet):
+
+<https://solscan.io/account/HShWcYbT6wGrndgauQxNrcNJuJQ1BX9CVZqFSn9Q7rNs>
 
 <https://solscan.io/account/FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh?cluster=devnet>
+
+Its `auditors` field reads "Pending external audit". It is compiled into the
+deployed bytes and means that no independent audit has been done yet.
 
 [sst]: https://github.com/neodyme-labs/solana-security-txt
 
@@ -237,21 +251,40 @@ Rehearse on devnet before mainnet so the response is muscle memory.
 
 ## Mainnet key custody & authority split
 
-Four roles with four risk profiles — never collapse them into one key:
+Four roles with four risk profiles. The target is to never collapse them into
+one key; today two of them are single keys and the upgrade authority is a
+single-signer Squads account. The table below is the **current mainnet state**
+(verified on chain on 2026-10-22), followed by the hardening target.
 
-| Role | Can do | Worst case if leaked | Mainnet custody |
+| Role | Can do | Worst case if leaked | Current mainnet custody |
 |---|---|---|---|
-| **Upgrade authority** | Replace program bytecode | Total loss of all escrowed funds | **2-of-3 Squads multisig** (or HSM). Rarely used; M-of-N friction is fine. |
-| **Config authority** | Pause, set treasury + default bps, hand off authority | Grief (pause) + redirect *future* commission; **cannot drain principal or upgrade** | Fast key you can `make pause` with in seconds — optimize for response speed. |
-| **Platform authority** | Per-escrow resolve / force-release / auto-release | Move funds only within the dispute/release rules of funded escrows | Hot backend key in a secrets manager / KMS; monitor its activity. |
-| **fee_recipient (treasury)** | Receive commission; **never signs** | — | Cold / receive-only or multisig wallet. |
+| **Upgrade authority** | Replace program bytecode | Total loss of all escrowed funds | **Squads v4 vault `CPVcsjPtSzYJ1NuVkBHkqb4FNvzr6JhqMPB4jGP45JFD`** of multisig `GiX7w2Ag4zD8ftUN5DpQgdP3R7KvQK2zUutbfcmrMdpu`, controlled by Worqen with **threshold 1 (a single signer) and no timelock**. One signature is enough to upgrade the program. |
+| **Config authority** | Pause, set treasury + default bps, edit the mint allowlist, set the platform authority pinned onto future escrows, hand off authority | Grief (pause) + redirect *future* commission + pin a different platform authority onto *future* escrows; **cannot upgrade the program or re-point escrows that already exist** | **Single key** `7GTsbFX9gywsrNQouUuvw5bChAeL9GCp24acMPKEC5Sn` (also the mainnet deployer). Not behind a multisig. Fast enough to `make pause` in seconds. |
+| **Platform authority** | Per-escrow resolve / force-release / auto-release / cancel, hourly invoice staging and approval on the employer's behalf | Move funds only within the dispute/release rules of funded escrows, and only to the escrow's recorded employer, employee and treasury | **Hot single key** `FonMQCHztDpr8UaZH6f2LvZr79a9XzJgKoLp9Dpz79pK` held by the Worqen backend servers. |
+| **fee_recipient (treasury)** | Receive commission; **never signs on-chain** | - | **Single key** `5jVqeEsYJaMtHZ4p3qKAhLgupo5Vre3anZWurKnQgDa8`, used from a wallet app and signing outflows. Not a multisig and not an offline wallet. |
+
+Because the upgrade authority is a single signer with no timelock, escrowed
+deals involve trust in Worqen: the program constrains where payouts can go, but
+an upgrade could change how it behaves.
+
+### Hardening target (not in effect)
+
+The documented goal, not the current state:
+
+| Role | Target custody |
+|---|---|
+| Upgrade authority | A Squads multisig with more than one signer (the earlier plan was 2-of-3), or an HSM. Rarely used; M-of-N friction is fine. |
+| Config authority | A fast key you can `make pause` with in seconds, optimized for response speed. |
+| Platform authority | Hot backend key in a secrets manager / KMS, with its activity monitored. |
+| fee_recipient (treasury) | Cold / receive-only or multisig wallet. |
 
 `fee_recipient` is snapshotted onto each escrow at create time, so changing
 `Config.fee_recipient` affects only *future* escrows — a compromised Config
 authority cannot retroactively reroute money already in flight.
 
-Bootstrap with a deployer key, then hand the Config authority to the multisig
-(two-step), and move the upgrade authority separately:
+Procedure to move to multisig custody (planned; **not yet performed on
+mainnet**): bootstrap with a deployer key, then hand the Config authority to
+the multisig (two-step), and move the upgrade authority separately:
 
 ```bash
 make bootstrap-config RPC_URL=https://<rpc> AUTHORITY_KEYPAIR=~/deployer.json \

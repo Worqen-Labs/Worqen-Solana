@@ -1,15 +1,52 @@
 # Worqen Escrow
 
-Trustless payment escrow and direct‑pay settlement for the [Worqen](https://worqen.com) job marketplace, written in Rust with the [Anchor](https://www.anchor-lang.com) framework on Solana. Employers lock funds in a program‑owned vault when they hire; workers are paid only after confirmation, with **platform‑mediated dispute resolution** and a permissionless **deadline safety net** so funds can never be stranded by an unresponsive platform. The program settles in native **SOL** and an **allowlisted set of SPL stablecoins** (USDC / USDT / EURC), charges a **fee‑on‑top commission** routed to a dedicated treasury, and also offers a non‑escrow **direct‑pay** path (single, batch, and tips) for trusted hires. For ongoing hourly work it adds the **hourly v2 engine**: the employer pre‑funds a money‑capped period vault (`HourlyPeriod`), the platform stages each approved block of hours as its own **`HourlyInvoice` PDA** with a review window, and every invoice pays out permissionlessly once its window elapses — or instantly when the employer (or the platform on their behalf) approves it — with the same platform‑mediated dispute and deadline safety net, applied per invoice.
+On‑chain payment escrow and direct‑pay settlement for the [Worqen](https://worqen.com) job marketplace, written in Rust with the [Anchor](https://www.anchor-lang.com) framework on Solana. Employers lock funds in a program‑owned vault when they hire; workers are paid only after confirmation, with **platform‑mediated dispute resolution** and a permissionless **deadline safety net** so funds can never be stranded by an unresponsive platform. The program settles in native **SOL** and an **allowlisted set of SPL stablecoins** (USDC / USDT / EURC), charges a **fee‑on‑top commission** routed to a dedicated treasury, and also offers a non‑escrow **direct‑pay** path (single, batch, and tips) for trusted hires. For ongoing hourly work it adds the **hourly v2 engine**: the employer pre‑funds a money‑capped period vault (`HourlyPeriod`), the platform stages each approved block of hours as its own **`HourlyInvoice` PDA** with a review window, and every invoice pays out permissionlessly once its window elapses — or instantly when the employer (or the platform on their behalf) approves it — with the same platform‑mediated dispute and deadline safety net, applied per invoice.
 
 [![Anchor](https://img.shields.io/badge/Anchor-1.1.2-blue)](https://www.anchor-lang.com)
-[![Solana](https://img.shields.io/badge/Solana-devnet-9945FF)](https://solana.com)
+[![Solana](https://img.shields.io/badge/Solana-mainnet-9945FF)](https://solana.com)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-green.svg)](./LICENSE)
-[![Audit](https://img.shields.io/badge/audit-pending-orange)](#8-security-model)
+[![Audit](https://img.shields.io/badge/independent%20audit-none%20yet-orange)](#8-security-model)
 
 ---
 
-## 1. Devnet deployment
+## Status
+
+> **Live on Solana mainnet since June 2026.** The escrow program is `HShWcYbT6wGrndgauQxNrcNJuJQ1BX9CVZqFSn9Q7rNs` ([Solscan](https://solscan.io/account/HShWcYbT6wGrndgauQxNrcNJuJQ1BX9CVZqFSn9Q7rNs) / [Explorer](https://explorer.solana.com/address/HShWcYbT6wGrndgauQxNrcNJuJQ1BX9CVZqFSn9Q7rNs)). **v1.5.0** (47 instructions) was deployed to mainnet on 2026-08-24 at slot 441429606; the on-chain program bytes hash to sha256 `2b37e588...` (full value in [`SECURITY.md`](./SECURITY.md)). The devnet program `FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh` (section 1) is for testing.
+>
+> **What you are trusting, plainly:**
+>
+> - **No independent audit has been done.** The program has had internal reviews only (see [`SECURITY.md`](./SECURITY.md#past-audits)).
+> - **The program is upgradeable by Worqen alone.** The upgrade authority is a Squads account controlled by Worqen with a single signer and no timelock, so one signature can replace the program code.
+> - **The Config authority is a single key.** It can pause the program, change the treasury and the mint allowlist, and set the platform authority that future escrows are pinned to.
+> - **Platform-directed settlement runs through one server-held key** (`platform_authority`): it decides disputes, cancels funded escrows and releases early, but the program only lets it pay the escrow's recorded employer, employee and treasury accounts - never itself.
+> - **Source-to-bytecode verification (`solana-verify`) of the deployed SBPFv3 bytes is not yet published** (open gap, see section 9).
+>
+> Escrowed deals therefore still involve trust in Worqen. The program constrains where payouts can go and adds a permissionless deadline safety net, but it is not a trustless system, and no authority is protected by more than one signer.
+
+---
+
+## 1. Deployments
+
+### Mainnet (live)
+
+| Field | Value |
+|---|---|
+| **Program ID** | `HShWcYbT6wGrndgauQxNrcNJuJQ1BX9CVZqFSn9Q7rNs` |
+| **Cluster** | `mainnet-beta` |
+| **Program version** | `v1.5.0` (47 instructions; hourly account schema version `2`, escrow schema version `1`), built with `--features mainnet`. First deployed 2026-06-02; upgraded to v1.5.0 on 2026-08-24 at slot 441429606. On-chain bytes sha256 `2b37e5881d319834762f52736a99d12e9d605c60537fda4e6441c53a09b42c6f` (751,720 B, SBPFv3). |
+| **On-chain IDL account** | None published on mainnet; use the IDL in this repo. |
+| **ProgramData account** | `53w6ynZcTcwnEqFXn4e3uGv8AwKcX9PLEPmp3NQiDztS` |
+| **Upgrade authority** | Squads v4 vault `CPVcsjPtSzYJ1NuVkBHkqb4FNvzr6JhqMPB4jGP45JFD` of multisig `GiX7w2Ag4zD8ftUN5DpQgdP3R7KvQK2zUutbfcmrMdpu`: **threshold 1 (a single signer controlled by Worqen), no timelock**. |
+| **Config PDA** | `F6cqSgcBv2Jo9ttHoPRVuQDvYv6yMVhFdkrJUNe8dsyP` (seed `"config"`) |
+| **Config authority** | `7GTsbFX9gywsrNQouUuvw5bChAeL9GCp24acMPKEC5Sn` - a **single key**, not behind a multisig. |
+| **Platform authority (hot ops key)** | `FonMQCHztDpr8UaZH6f2LvZr79a9XzJgKoLp9Dpz79pK` - a single key held by the Worqen backend servers. |
+| **Treasury (`fee_recipient`)** | `5jVqeEsYJaMtHZ4p3qKAhLgupo5Vre3anZWurKnQgDa8` - a single key used from a wallet app; not a multisig and not an offline wallet. |
+| **Explorer** | <https://explorer.solana.com/address/HShWcYbT6wGrndgauQxNrcNJuJQ1BX9CVZqFSn9Q7rNs> |
+| **Solscan** | <https://solscan.io/account/HShWcYbT6wGrndgauQxNrcNJuJQ1BX9CVZqFSn9Q7rNs> |
+
+Authority and treasury custody are recorded as verified on chain on 2026-10-22. The same facts are tabulated, with the hardening target, in [`SECURITY.md`](./SECURITY.md#mainnet-key-custody--authority-split).
+
+### Devnet (testing)
 
 | Field | Value |
 |---|---|
@@ -18,10 +55,10 @@ Trustless payment escrow and direct‑pay settlement for the [Worqen](https://wo
 | **Program version** | `v1.5.0` (47 instructions; hourly account schema version `2`, escrow schema version `1`) — deployed to devnet 2026-08-17 at slot 484755229, tx `64q6nFoc…`, on-chain bytes sha256 `73ea9104…` (751,720 B, SBPFv3), byte-identical to `target/deploy-v3/worqen_escrow.so`; see `devnet-deployment.json`. |
 | **On‑chain IDL account** | `D5EDchbfDVyCfgF1SmVTXutyDAiSU4R5ZYWyH3urwXZC` (Program Metadata Program, canonical `idl` seed — Anchor 1.x. The legacy Anchor-0.32 account `2Y1y1m4c…` was closed on 2026-08-17 and its rent recovered. If `anchor idl fetch` returns a truncated stream, re-run `make idl-devnet`.) |
 | **ProgramData account** | `5dGNYXHqDNk83Hch1MUPKGx3CviFcWX5cPKQFHFiZQcw` |
-| **Upgrade authority** | `Gg5L88vFoL32Dw64qXX4SirD8SHPfCjJEqm3Qrjjh6zz` (devnet single key, `~/.config/solana/devnet-escrow.json`; mainnet must be a multisig) |
+| **Upgrade authority** | `Gg5L88vFoL32Dw64qXX4SirD8SHPfCjJEqm3Qrjjh6zz` (devnet single key, `~/.config/solana/devnet-escrow.json`) |
 | **Config PDA** | `FmxSRZbdgqnA5ufZ3DP2t8swyMPn6pLboFa6JxHLC9aL` (seed `"config"`) |
 | **Config authority** | `MPq6BwTsfBNmA7DwdaRGLeX8Bg67Kj5sFwsiYDexste` |
-| **Treasury (`fee_recipient`)** | `49gGSC3hGZ2KFX4rFou9PJqjMchKQGNBpFQzpYhaNan1` (dedicated devnet treasury; mainnet must be a cold/multisig wallet) |
+| **Treasury (`fee_recipient`)** | `49gGSC3hGZ2KFX4rFou9PJqjMchKQGNBpFQzpYhaNan1` (dedicated devnet treasury) |
 | **`Config.platform_authority`** | `64PF1jbXinCFteyegYpkPJ25fHKibPeVGJsjmc4AH46H` (the backend ops key; must be set before any `open_period` can succeed) |
 | **Explorer** | <https://explorer.solana.com/address/FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh?cluster=devnet> |
 | **Solscan** | <https://solscan.io/account/FinhtLJ4PVBwVi8tGwWoCzN3vDpcMofBZFXFzmntGxEh?cluster=devnet> |
@@ -56,7 +93,7 @@ Every escrow names three roles plus a separate fee destination:
 | **platform_authority** | Per‑escrow **hot ops key** (the Worqen backend). Resolves disputes, cancels funded escrows, force/auto‑releases, rotates keys. | Yes | **No — it never receives commission** |
 | **fee_recipient** | The **treasury** (`Config.fee_recipient`, snapshotted onto each escrow at create). Receives all commission. | **Never signs** | Receives commission only |
 
-The strict separation between the **ops key** (`platform_authority`, hot, signs) and the **treasury** (`fee_recipient`, cold, never signs) means a compromise of the operations key cannot redirect funds to itself.
+The program keeps the **ops key** (`platform_authority`, hot, signs) separate from the **treasury** (`fee_recipient`, never signs on-chain), so a compromised ops key cannot pay itself. It can still decide disputes and direct settlement between the escrow's recorded parties, which is why escrowed deals involve trust in Worqen (see the Status block above).
 
 ### The global Config PDA
 
@@ -353,7 +390,7 @@ Every money‑moving instruction is a `_sol` / `_token` pair; `open_period`, `ra
 | Field | Type | Meaning |
 |---|---|---|
 | `version` | `u8` | Config schema version (`1`) |
-| `authority` | `Pubkey` | Admin (multisig on mainnet) — pause, allowlist, default fee, treasury |
+| `authority` | `Pubkey` | Admin (a single key on mainnet today) — pause, allowlist, default fee, treasury, platform authority for future escrows |
 | `pending_authority` | `Pubkey` | Pending admin during a two‑step handoff (`default` = none) |
 | `fee_recipient` | `Pubkey` | Treasury that receives commission; snapshotted onto each escrow |
 | `default_commission_bps` | `u16` | Informational default rate (`500`) |
@@ -561,16 +598,16 @@ Hourly commission uses a **cumulative‑delta** rule (`HourlyPeriod::marginal_co
 
 ## 8. Security model
 
-- **Role separation.** The treasury (`fee_recipient`) **never signs** — it is a cold, receive‑only key. The per‑escrow `platform_authority` is a **hot ops key that never holds fees**, decoupled from the treasury. The commission destination is snapshotted at create time, so a later Config change can never re‑route an in‑flight escrow.
-- **Upgrade authority.** On devnet a single file key (acceptable for devnet); **on mainnet the upgrade authority and Config authority must be a Squads multisig / HSM** (transfer post‑deploy with `solana program set-upgrade-authority`). Config admin uses a **two‑step handoff** so the keys can never be sent to a wrong address.
+- **Role separation.** The program never requires the treasury (`fee_recipient`) to sign, and the per‑escrow `platform_authority` is a **hot ops key that never receives fees**, decoupled from the treasury. On mainnet today the treasury is a single key used from a wallet app (not a multisig, not offline). The commission destination is snapshotted at create time, so a later Config change can never re‑route an in‑flight escrow.
+- **Upgrade authority and Config authority (current mainnet state).** The program is upgradeable through the BPF upgradeable loader. On mainnet the upgrade authority is a Squads vault whose multisig has **one signer (threshold 1) and no timelock**, controlled by Worqen: a single signature can replace the program code, and an upgrade could change how the program treats funds already in escrow. The Config authority is a **single key**, not behind a multisig; it can pause the program, change the treasury and the mint allowlist, and set the platform authority that future escrows are pinned to, but it cannot upgrade the program or re‑point escrows that already exist. Devnet uses a single file key. **Target hardening (documented goal, not in effect):** move both authorities behind a multisig with more than one signer; the Config handoff is two‑step (`update_config(new_pending_authority)` then `accept_authority`) so the key can never be sent to a wrong address.
 - **Drain‑actual‑balance.** All SOL release/resolve/cancel/settle paths transfer the vault's *real* lamport balance, defeating dust‑deposit DoS that would otherwise strand a vault below the rent‑exempt minimum.
 - **Mint allowlist.** Only SOL plus an admin‑curated set of SPL mints are accepted. **Accepted‑stablecoin freeze risk:** USDC/USDT/EURC carry an issuer freeze authority; a frozen vault ATA or recipient ATA could block a transfer. The allowlist limits exposure to vetted issuers, and the deadline safety net plus close paths bound the blast radius.
 - **Minimum dispute window.** A mandatory 3‑day floor on `dispute_deadline` guarantees the platform always has time to mediate before anyone can permissionlessly force‑resolve — closing the self‑dispute‑then‑instant‑payout hole. What removes any incentive for the platform to stall is the permissionless auto‑release: after the deadline **anyone** can force‑resolve to the worker, so an unresponsive platform can never strand funds. (As of v1.1.0 the platform *retains* its commission — routed to the treasury — on a resolved or force‑resolved dispute, cancel, or mutual cancel; it is no longer refunded to the employer.)
 - **Pause that can't strand funds.** The kill‑switch gates the 15 money‑in instructions that carry the `Config` account — new escrows, all direct/batch pay, and every hourly intake and release‑on‑request path (`stage_invoice_*`, `approve_invoice_*`). Releases, confirms, disputes, resolves, auto‑releases, `finalize_invoice_*`, settles, and closes are always available, so every party can still withdraw while paused. `approve_invoice_*` is deliberately inside the gate even though it pays out: it is the only payout callable at will with no time lock, and the same invoice still settles through the pause‑free `finalize_invoice_*` once `release_at` passes. Since v1.4.0 `deposit_sol` / `deposit_token` are inside the gate too, so a pause stops every inflow.
-- **`security_txt`.** The program embeds a [`solana-security-txt`](https://github.com/neodyme-labs/solana-security-txt) block: contact `security@worqen.com`, policy and source on GitHub, **`auditors: "Pending external audit"`**.
+- **`security_txt`.** The program embeds a [`solana-security-txt`](https://github.com/neodyme-labs/solana-security-txt) block: contact `security@worqen.com`, policy and source on GitHub, **`auditors: "Pending external audit"`** (compiled into the deployed bytes; it means no independent audit has been done yet).
 - **Forward compatibility.** All four account types carry a `version` byte and a `reserved` tail (`Escrow` 64 B, `HourlyPeriod` 64 B, `HourlyInvoice` 32 B, `Config` 32 B) so additive fields can be carved in without a realloc — `Config.platform_authority` was added exactly this way. `escrow_kind` is a `u8` (not a closed enum) so new product flows need no schema migration. Off‑chain decoders that hardcode byte offsets (the backend does) must be re‑checked after **any** field insert or reorder.
 
-> **Audit status:** *Pending external audit.* Do not deploy to mainnet with real funds until the audit is complete and the upgrade/config authorities are multisig.
+> **Audit status:** *No independent audit has been done.* The program has had internal reviews only (see [`SECURITY.md`](./SECURITY.md#past-audits)) and it holds real escrows on mainnet. Weigh the trust assumptions in the Status block and in this section, and the absence of an independent audit, before putting funds through it.
 
 For the full rationale behind every hardening decision, see [`SECURITY.md`](./SECURITY.md) and the security‑driven release notes in [`devnet-deployment.json`](./devnet-deployment.json).
 
@@ -669,7 +706,9 @@ solana-verify verify-from-repo --remote -um \
 
 Or run `make verify-devnet` / `scripts/verify.sh`.
 
-Use a fresh secure program keypair, update `declare_id!` + `Anchor.toml`, and deploy with a Squads multisig as both upgrade and config authority.
+Status: the deployed mainnet bytes are not yet registered as verified against this source (open gap, see the note under Continuous integration).
+
+A new deployment needs a fresh, securely stored program keypair. The upgrade authority and Config authority are then transferred with `solana program set-upgrade-authority` and the two‑step Config handoff. Mainnet today: the upgrade authority is a single‑signer Squads vault with no timelock and the Config authority is a single key (see Status).
 
 ### Continuous integration & deployment
 
@@ -690,7 +729,7 @@ Required secrets (set per **Environment** in repo settings):
 | `DEVNET_AUTHORITY_KEYPAIR` | `devnet` | JSON byte‑array of the devnet upgrade authority (deploy + IDL + fee payer). |
 | `MAINNET_DEPLOYER_KEYPAIR` | `mainnet-beta` | Funded fee payer used **only** to write the upgrade buffer (never the authority). |
 | `MAINNET_PROGRAM_ID` | `mainnet-beta` | The mainnet program id. |
-| `MAINNET_UPGRADE_MULTISIG` | `mainnet-beta` | Squads multisig that receives buffer authority and executes the upgrade. |
+| `MAINNET_UPGRADE_MULTISIG` | `mainnet-beta` | Squads account that receives buffer authority and executes the upgrade (today a single‑signer Squads account). |
 
 Configure the `mainnet-beta` environment with **required reviewers** so every mainnet release needs manual approval.
 
@@ -718,13 +757,13 @@ Yes — `batch_pay_with_commission_*` fans out to up to **16 recipients** atomic
 - *Platform fails to mediate a dispute:* after `dispute_deadline` (3–90 days), **anyone** can call `trigger_auto_release_*` to pay the worker. Funds are never permanently frozen.
 
 **Can the platform steal funds?**
-No. The treasury never signs, and the hot `platform_authority` can only **split** disputed funds between the actual employer and employee accounts (both verified on‑chain against the escrow) — it can never pay itself. On mainnet the upgrade/config authority is a multisig, so no single key can change program behavior.
+Not by itself, but it is not trustless either. The program never requires the treasury to sign, and the hot `platform_authority` can only **split** disputed funds between the actual employer and employee accounts (both verified on‑chain against the escrow), cancel or release to those recorded parties, and route commission to the recorded treasury - it can never pay itself. What the program does *not* prevent: that one `platform_authority` key decides how a dispute is split; the program is upgradeable by a Squads account controlled by Worqen with a single signer and no timelock, so an upgrade could change program behaviour; and the Config authority is a single key. Escrowed deals therefore still involve trust in Worqen. The permissionless deadline safety net (anyone can force‑resolve to the worker after `dispute_deadline`) means an unresponsive platform cannot strand funds.
 
 **What if my USDC account is frozen?**
 USDC/USDT/EURC carry an issuer freeze authority, so a frozen ATA can block a token transfer — an inherent property of those tokens, not the program. The mint allowlist limits exposure to vetted issuers; native SOL is never freezable.
 
 **Is the program upgradeable, and who controls it?**
-Yes, via the BPF upgradeable loader. On devnet a single key controls upgrades; **on mainnet this must be a Squads multisig / HSM**, and Config admin changes go through a two‑step handoff.
+Yes, via the BPF upgradeable loader. On mainnet the upgrade authority is a Squads vault controlled by Worqen with a **single signer and no timelock**; the Config authority is a **single key**; devnet uses a single file key. Moving both behind a multisig with more than one signer is the documented hardening target, not the current state. Config admin changes go through a two‑step handoff.
 
 **What's the cost per escrow?**
 Roughly **~0.005 SOL** of rent for the escrow account (plus a small vault), fully **refundable** by calling `close_escrow_*` (or `close_unfunded_escrow_*` for a never‑funded one) once the escrow is terminal.
@@ -733,7 +772,7 @@ Roughly **~0.005 SOL** of rent for the escrow account (plus a small vault), full
 Native **SOL** (always) plus the **admin‑curated SPL allowlist** (up to 30 mints) — in production, USDC, USDT, and EURC.
 
 **Is it audited?**
-Not yet — status is **pending external audit**. Do not put real funds on mainnet until the audit completes and authorities are multisig.
+No independent audit has been done. The program has had internal reviews only (see [`SECURITY.md`](./SECURITY.md#past-audits)), and it is live on mainnet and holds real escrows. Read the trust assumptions above before relying on it.
 
 **How do disputes work and what is the deadline?**
 Either party (employer‑only after a confirm) raises a dispute with a mandatory deadline in `[now + 3 days, now + 90 days]`, freezing funds. The platform resolves by splitting the remaining worker amount (the commission is retained by the treasury). If the platform never acts, anyone can force‑resolve in the worker's favor after the deadline.
