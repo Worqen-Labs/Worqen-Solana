@@ -60,9 +60,9 @@ jobs:
           cp target/deploy-v3/worqen_escrow.so dist/worqen_escrow.v3.so
 
       # The reproducible artifact backing `solana-verify verify-from-repo`.
-      # solana-verify pins its own container toolchain and has no --arch knob,
-      # so this is a DEFAULT-ARCH build and its hash does NOT match the v3 bytes
-      # written to the mainnet buffer. Publish both; see CLAUDE.md.
+      # This is a DEFAULT-ARCH build, so its hash does NOT match the v3 bytes
+      # written to the mainnet buffer. A matching verifiable v3 build needs
+      # `--arch v3` plus a tools-version v1.55 pin; see CLAUDE.md.
       - name: Reproducible build (Docker, default arch)
         run: solana-verify build --library-name worqen_escrow -- --features mainnet
 
@@ -102,8 +102,9 @@ jobs:
               build for source verification:
               `solana-verify verify-from-repo --remote -um --program-id <ID> --library-name worqen_escrow ${{ github.server_url }}/${{ github.repository }} -- --features mainnet`
 
-            The two hashes differ by construction — solana-verify has no `--arch` knob,
-            so on-chain `solana-verify` verification of the v3 bytes is not available yet.
+            The two hashes differ by construction: the reproducible build is default-arch
+            and the deployed bytes are SBPFv3 built outside the verifiable container, so
+            on-chain `solana-verify` verification of the v3 bytes is not available yet.
 
   mainnet-buffer:
     name: Write verified buffer for the multisig (manual approval)

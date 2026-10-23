@@ -720,7 +720,7 @@ Three GitHub Actions workflows in `.github/workflows/`:
 | **`deploy.yml`** | manual (`workflow_dispatch`) | Builds both artifacts, **upgrades the devnet program in place with the SBPFv3 one**, refreshes the on‑chain IDL, and re‑runs the LiteSVM suite on the default‑arch build. Gated by the `devnet` environment. |
 | **`release.yml`** | tag `v*` | **Reproducible `solana-verify` build** (default arch) *and* the SBPFv3 deployable, publishes both `.so`s + IDL + both hashes as a **GitHub Release**, and (behind the protected `mainnet-beta` environment) writes the **v3 buffer for the Squads multisig** to execute the mainnet upgrade. |
 
-> `solana-verify` has no `--arch` knob, so `program-hash.txt` (reproducible, default arch) and `program-hash-v3.txt` (the bytes actually deployed) differ by construction. On‑chain source verification of the shipped v3 bytes is an open gap.
+> `program-hash.txt` (reproducible, default arch) and `program-hash-v3.txt` (the bytes actually deployed) differ by construction. The live mainnet v1.5.0 bytes were built on macOS, so no Linux or Docker build reproduces them byte for byte, and on‑chain source verification of the shipped v3 bytes is an open gap. A verifiable v3 build is possible (`solana-verify build --library-name worqen_escrow --arch v3 --base-image solanafoundation/solana-verifiable-build:4.0.0 -- --features mainnet` with `[workspace.metadata.solana] tools-version = "v1.55"` in the root `Cargo.toml`); using it for the next mainnet upgrade would make that upgrade verifiable.
 
 Required secrets (set per **Environment** in repo settings):
 
